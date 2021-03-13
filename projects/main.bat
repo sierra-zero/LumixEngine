@@ -25,9 +25,10 @@ if not %errorlevel%==0 set msbuild_cmd="C:\Program Files (x86)\Microsoft Visual 
 	echo   A. Plugins
 	echo   B. Create project - static physx
 	echo   C. Push to itch.io
-	echo   D. Create project with app 
+	echo   D. Push to itch.io (DX11)
+	echo   E. Create project with app 
 	echo ===============================
-	choice /C 123456789ABCD /N /M "Your choice:"
+	choice /C 123456789ABCDE /N /M "Your choice:"
 	echo.
 
 	if %errorlevel%==1 goto :EOF
@@ -42,26 +43,37 @@ if not %errorlevel%==0 set msbuild_cmd="C:\Program Files (x86)\Microsoft Visual 
 	if %errorlevel%==10 call :plugins
 	if %errorlevel%==11 call :create_project_static_physx
 	if %errorlevel%==12 call :push_to_itch_io
-	if %errorlevel%==13 call :create_project_with_app
+	if %errorlevel%==13 call :push_to_itch_io_dx
+	if %errorlevel%==14 call :create_project_with_app
 goto :begin
 
 :plugins 
 	cls
-	echo Wut?
+	echo Wut? - you have to (re)create project if you download/upgrade plugin
 	echo ===============================
 	echo  1. Go back
-	echo  2. Maps
-	echo  3. Shader editor
-	echo  4. GLTF importer
-	echo  5. DX11
+	echo  2. Empty plugin template
+	echo  3. Maps
+	echo  4. Shader editor
+	echo  5. GLTF importer
+	echo  6. DX11 and DX12
+	echo  7. Rml UI
+	echo  8. Network
+	echo  9. JS
+	echo  A. C#
 	echo ===============================
-	choice /C 12345 /N /M "Your choice:"
+	choice /C 123456789 /N /M "Your choice:"
 	echo.
 	if %errorlevel%==1 exit /B 0
-	if %errorlevel%==2 call :map_plugin
-	if %errorlevel%==3 call :shader_editor_plugin
-	if %errorlevel%==4 call :glft_import_plugin
-	if %errorlevel%==5 call :dx11_plugin
+	if %errorlevel%==2 call :empty_plugin
+	if %errorlevel%==3 call :map_plugin
+	if %errorlevel%==4 call :shader_editor_plugin
+	if %errorlevel%==5 call :glft_import_plugin
+	if %errorlevel%==6 call :dx_plugin
+	if %errorlevel%==7 call :rml_ui_plugin
+	if %errorlevel%==8 call :network_plugin
+	if %errorlevel%==9 call :js_plugin
+	if %errorlevel%==10 call :cs_plugin
 	pause
 goto :plugins
 
@@ -72,13 +84,20 @@ goto :plugins
 	pause
 exit /B 0
 
-:dx11_plugin
+:push_to_itch_io_dx
+	if not exist itch_io mkdir itch_io
+	copy tmp\vs2019\bin\RelWithDebInfo\studio.exe itch_io\
+	butler.exe push itch_io mikulasflorek/lumix-engine:win-64-dx
+	pause
+exit /B 0
+
+:dx_plugin
 	if not exist ..\plugins mkdir ..\plugins
 	pushd ..\plugins
-	if not exist dx11 (
-		git.exe clone https://github.com/nem0/lumixengine_dx11.git dx11
+	if not exist dx (
+		git.exe clone https://github.com/nem0/lumixengine_dx.git dx
 	) else (
-		cd dx11
+		cd dx
 		git pull
 	)
 	popd
@@ -91,6 +110,54 @@ exit /B 0
 		git.exe clone https://github.com/nem0/lumixengine_gltf.git gltf_import
 	) else (
 		cd gltf_import
+		git pull
+	)
+	popd
+exit /B 0
+
+:rml_ui_plugin
+	if not exist ..\plugins mkdir ..\plugins
+	pushd ..\plugins
+	if not exist rml (
+		git.exe clone https://github.com/nem0/lumixengine_rml.git rml
+	) else (
+		cd rml
+		git pull
+	)
+	popd
+exit /B 0
+
+:network_plugin
+	if not exist ..\plugins mkdir ..\plugins
+	pushd ..\plugins
+	if not exist net (
+		git.exe clone https://github.com/nem0/lumixengine_net.git net
+	) else (
+		cd net
+		git pull
+	)
+	popd
+exit /B 0
+
+:js_plugin
+	if not exist ..\plugins mkdir ..\plugins
+	pushd ..\plugins
+	if not exist js (
+		git.exe clone https://github.com/nem0/lumixengine_js.git js
+	) else (
+		cd js
+		git pull
+	)
+	popd
+exit /B 0
+
+:cs_plugin
+	if not exist ..\plugins mkdir ..\plugins
+	pushd ..\plugins
+	if not exist csharp (
+		git.exe clone https://github.com/nem0/lumixengine_csharp.git csharp
+	) else (
+		cd csharp
 		git pull
 	)
 	popd
@@ -115,6 +182,18 @@ exit /B 0
 		git.exe clone https://github.com/nem0/lumixengine_maps.git maps
 	) else (
 		cd maps
+		git pull
+	)
+	popd
+exit /B 0
+
+:empty_plugin
+	if not exist ..\plugins mkdir ..\plugins
+	pushd ..\plugins
+	if not exist myplugin (
+		git.exe clone https://github.com/nem0/lumix_plugin_template.git myplugin
+	) else (
+		cd myplugin
 		git pull
 	)
 	popd
@@ -172,8 +251,10 @@ exit /B 0
 	echo ===============================
 	echo  1. Go back
 	echo  2. Download
-	echo  3. Build
-	echo  4. Deploy
+	if exist "3rdparty\luajit\" (
+		echo  3. Build
+		echo  4. Deploy
+	)
 	echo ===============================
 	choice /C 1234 /N /M "Your choice:"
 	echo.
@@ -222,9 +303,11 @@ exit /B 0
 	echo ===============================
 	echo  1. Go back
 	echo  2. Download
-	echo  3. Build
-	echo  4. Deploy
-	echo  5. Open in VS
+	if exist "3rdparty\freetype\" (
+		echo  3. Build
+		echo  4. Deploy
+		echo  5. Open in VS
+	)
 	echo ===============================
 	choice /C 12345 /N /M "Your choice:"
 	echo.
@@ -255,10 +338,12 @@ exit /B 0
 	echo ===============================
 	echo  1. Go back
 	echo  2. Download
-	echo  3. Build
-	echo  4. Build and deploy static
-	echo  5. Deploy
-	echo  6. Open in VS
+	if exist "3rdparty\PhysX\" (
+		echo  3. Build
+		echo  4. Build and deploy static
+		echo  5. Deploy
+		echo  6. Open in VS
+	)
 	echo ===============================
 	choice /C 123456 /N /M "Your choice:"
 	echo.
@@ -334,9 +419,11 @@ exit /B 0
 	echo ===============================
 	echo  1. Go back
 	echo  2. Download
-	echo  3. Build
-	echo  4. Deploy
-	echo  5. Open in VS
+	if exist "3rdparty\recast\" (
+		echo  3. Build
+		echo  4. Deploy
+		echo  5. Open in VS
+	)
 	echo ===============================
 	choice /C 12345 /N /M "Your choice:"
 	echo.
@@ -371,9 +458,11 @@ exit /B 0
 	echo ===============================
 	echo  1. Go back
 	echo  2. Download
-	echo  3. Build
-	echo  4. Deploy
-	echo  5. Open in VS
+	if exist "3rdparty\nvtt\" (
+		echo  3. Build
+		echo  4. Deploy
+		echo  5. Open in VS
+	)
 	echo ===============================
 	choice /C 12345 /N /M "Your choice:"
 	if %errorlevel%==1 exit /B 0
@@ -396,19 +485,19 @@ exit /B 0
 
 :create_project
 	echo Creating project...
-	genie.exe --static-plugins vs2019 
+	genie.exe vs2019 
 	pause
 exit /B 0
 
 :create_project_with_app
 	echo Creating project...
-	genie.exe --static-plugins --with-app vs2019 
+	genie.exe --with-app vs2019 
 	pause
 exit /B 0
 
 :create_project_static_physx
 	echo Creating project with statically linked PhysX...
-	genie.exe --static-plugins --static-physx vs2019 
+	genie.exe --static-physx vs2019 
 	pause
 exit /B 0
 
@@ -433,7 +522,7 @@ exit /B 0
 
 :create_bundle
 	echo Creating bundle...
-	genie.exe --embed-resources --static-plugins --static-physx vs2019
+	genie.exe --embed-resources --static-physx vs2019
 	cd ..\data
 	tar -cvf data.tar .
 	move data.tar ../src/studio

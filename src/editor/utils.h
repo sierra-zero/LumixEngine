@@ -2,11 +2,11 @@
 
 #include "engine/delegate.h"
 #include "engine/lumix.h"
-#include "engine/os.h"
 #include "engine/string.h"
 
-namespace Lumix
-{
+namespace Lumix {
+
+namespace os { enum class Keycode : u8; }
 
 struct LUMIX_EDITOR_API ResourceLocator {
 	ResourceLocator(const Span<const char>& path);
@@ -15,6 +15,7 @@ struct LUMIX_EDITOR_API ResourceLocator {
 	Span<const char> dir;
 	Span<const char> basename;
 	Span<const char> ext;
+	Span<const char> resource;
 
 	Span<const char> full;
 };
@@ -22,11 +23,12 @@ struct LUMIX_EDITOR_API ResourceLocator {
 
 struct LUMIX_EDITOR_API Action
 {
-	Action(const char* label_short, const char* label_long, const char* name, const char* font_icon = "");
-	Action(const char* label_short, const char* label_long, const char* name, const char* font_icon, OS::Keycode key0, u8 modifiers);
-	bool toolbarButton(ImFont* font);
+	Action();
+	void init(const char* label_short, const char* label_long, const char* name, const char* font_icon, os::Keycode key0, u8 modifiers, bool is_global);
+	void init(const char* label_short, const char* label_long, const char* name, const char* font_icon, bool is_global);
+	bool toolbarButton(struct ImFont* font);
 	bool isActive();
-	bool shortcutText(Span<char> out);
+	bool shortcutText(Span<char> out) const;
 
 	static bool falseConst() { return false; }
 
@@ -37,7 +39,7 @@ struct LUMIX_EDITOR_API Action
 	};
 
 	u8 modifiers = 0;
-	OS::Keycode shortcut = OS::Keycode::INVALID;
+	os::Keycode shortcut;
 	StaticString<32> name;
 	StaticString<32> label_short;
 	StaticString<64> label_long;
@@ -48,7 +50,8 @@ struct LUMIX_EDITOR_API Action
 	Delegate<bool ()> is_selected;
 };
 
-
+LUMIX_EDITOR_API void getShortcut(const Action& action, Span<char> buf);
+LUMIX_EDITOR_API void doMenuItem(Action& a, bool enabled);
 LUMIX_EDITOR_API void getEntityListDisplayName(struct StudioApp& app, struct WorldEditor& editor, Span<char> buf, EntityPtr entity);
 
 

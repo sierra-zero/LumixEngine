@@ -13,11 +13,9 @@ namespace Lumix
 struct Animation;
 struct IAllocator;
 struct OutputMemoryStream;
-template <typename Key> struct HashFunc;
-template <typename K, typename V, typename H> struct HashMap;
 
 
-namespace Anim
+namespace anim
 {
 
 
@@ -90,13 +88,14 @@ struct Condition
 	explicit Condition(IAllocator& allocator);
 
 	bool eval(const struct RuntimeContext& rc) const;
-	Error compile(const char* expression, InputDecl& decl);
+	void compile(const char* expression, InputDecl& decl);
 
 	Array<u8> bytecode;
+	Error error = Error::NONE;
 };
 
 
-} // namespace Anim
+} // namespace anim
 
 
 } // namespace Lumix

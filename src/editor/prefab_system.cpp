@@ -1,5 +1,3 @@
-#include <imgui/imgui.h>
-
 #include "prefab_system.h"
 #include "editor/asset_browser.h"
 #include "editor/asset_compiler.h"
@@ -18,7 +16,6 @@
 #include "engine/reflection.h"
 #include "engine/resource.h"
 #include "engine/resource_manager.h"
-#include "engine/serializer.h"
 #include "engine/string.h"
 #include "engine/universe.h"
 
@@ -59,23 +56,21 @@ struct PrefabSystemImpl final : PrefabSystem
 {
 	struct InstantiatePrefabsCommand final : IEditorCommand
 	{
-		InstantiatePrefabsCommand(WorldEditor& editor)
+		InstantiatePrefabsCommand(EntityPtr* output, PrefabResource& prefab, WorldEditor& editor)
 			: editor(editor)
 			, transforms(editor.getAllocator())
 			, entities(editor.getAllocator())
+			, output(output)
+			, prefab(prefab)
 		{
+			ASSERT(prefab.isReady());
+			prefab.incRefCount();
 		}
 
 
 		~InstantiatePrefabsCommand()
 		{
-			prefab->getResourceManager().unload(*prefab);
-		}
-
-
-		bool isReady() override
-		{
-			return prefab->isReady() || prefab->isFailure();
+			prefab.decRefCount();
 		}
 
 
@@ -96,13 +91,18 @@ struct PrefabSystemImpl final : PrefabSystem
 		bool execute() override
 		{
 			ASSERT(entities.empty());
-			if (prefab->isFailure()) return false;
+			if (prefab.isFailure()) return false;
 			
 			entities.reserve(transforms.size());
-			ASSERT(prefab->isReady());
+			ASSERT(prefab.isReady());
 			auto& system = (PrefabSystemImpl&)editor.getPrefabSystem();
 
-			system.doInstantiatePrefabs(*prefab, transforms, Ref(entities));
+			system.doInstantiatePrefabs(prefab, transforms, entities);
+			if (output) {
+				*output = entities[0];
+				output = nullptr;
+			}
+
 			return !entities.empty();
 		}
 
@@ -129,10 +129,11 @@ struct PrefabSystemImpl final : PrefabSystem
 
 		bool merge(IEditorCommand& command) override { return false; }
 
-		PrefabResource* prefab;
+		PrefabResource& prefab;
 		Array<Transform> transforms;
 		WorldEditor& editor;
 		Array<EntityRef> entities;
+		EntityPtr* output;
 	};
 
 public:
@@ -166,7 +167,7 @@ public:
 
 		m_roots.clear();
 		for (const PrefabVersion& prefab : m_resources) {
-			prefab.resource->getResourceManager().unload(*prefab.resource);
+			prefab.resource->decRefCount();
 		}
 		m_resources.clear();
 		m_entity_to_prefab.clear();
@@ -221,13 +222,13 @@ public:
 	}
 	
 
-	void doInstantiatePrefabs(PrefabResource& prefab_res, const Array<Transform>& transforms, Ref<Array<EntityRef>> entities)
+	void doInstantiatePrefabs(PrefabResource& prefab_res, const Array<Transform>& transforms, Array<EntityRef>& entities)
 	{
 		ASSERT(prefab_res.isReady());
 		if (!m_resources.find(prefab_res.getPath().getHash()).isValid())
 		{
 			m_resources.insert(prefab_res.getPath().getHash(), {prefab_res.content_hash, &prefab_res});
-			prefab_res.getResourceManager().load(prefab_res);
+			prefab_res.incRefCount();
 		}
 		
 		Engine& engine = m_editor.getEngine();
@@ -237,8 +238,8 @@ public:
 		
 		for (const Transform& tr : transforms) {
 			entity_map.m_map.clear();
-			if (!engine.instantiatePrefab(*m_universe, prefab_res, tr.pos, tr.rot, tr.scale, Ref(entity_map))) {
-				logError("Editor") << "Failed to instantiate prefab " << prefab_res.getPath();
+			if (!engine.instantiatePrefab(*m_universe, prefab_res, tr.pos, tr.rot, tr.scale, entity_map)) {
+				logError("Failed to instantiate prefab ", prefab_res.getPath());
 				return;
 			}
 
@@ -248,7 +249,7 @@ public:
 
 			const EntityRef root = (EntityRef)entity_map.m_map[0];
 			m_roots.insert(root, prefab);
-			entities->push(root);
+			entities.push(root);
 		}
 	}
 
@@ -259,12 +260,12 @@ public:
 		if (!m_resources.find(prefab_res.getPath().getHash()).isValid())
 		{
 			m_resources.insert(prefab_res.getPath().getHash(), {prefab_res.content_hash, &prefab_res});
-			prefab_res.getResourceManager().load(prefab_res);
+			prefab_res.incRefCount();
 		}
 		
 		EntityMap entity_map(m_editor.getAllocator());
-		if (!m_editor.getEngine().instantiatePrefab(*m_universe, prefab_res, pos, rot, scale, Ref(entity_map))) {
-			logError("Editor") << "Failed to instantiate prefab " << prefab_res.getPath();
+		if (!m_editor.getEngine().instantiatePrefab(*m_universe, prefab_res, pos, rot, scale, entity_map)) {
+			logError("Failed to instantiate prefab ", prefab_res.getPath());
 			return INVALID_ENTITY;
 		}
 
@@ -279,23 +280,20 @@ public:
 	}
 
 	void instantiatePrefabs(struct PrefabResource& prefab, Span<struct Transform> transforms) override {
-		InstantiatePrefabsCommand* cmd = LUMIX_NEW(m_editor.getAllocator(), InstantiatePrefabsCommand)(m_editor);
+		UniquePtr<InstantiatePrefabsCommand> cmd = UniquePtr<InstantiatePrefabsCommand>::create(m_editor.getAllocator(), nullptr, prefab, m_editor);
 		cmd->transforms.resize(transforms.length());
 		memcpy(cmd->transforms.begin(), transforms.begin(), transforms.length() * sizeof(transforms[0]));
-		prefab.getResourceManager().load(prefab);
-		cmd->prefab = &prefab;
-		m_editor.executeCommand(cmd);
+		m_editor.executeCommand(cmd.move());
 	}
 
 	EntityPtr instantiatePrefab(PrefabResource& prefab, const DVec3& pos, const Quat& rot, float scale) override
 	{
-		InstantiatePrefabsCommand* cmd = LUMIX_NEW(m_editor.getAllocator(), InstantiatePrefabsCommand)(m_editor);
+		ASSERT(prefab.isReady());
+		EntityPtr res;
+		UniquePtr<InstantiatePrefabsCommand> cmd = UniquePtr<InstantiatePrefabsCommand>::create(m_editor.getAllocator(), &res, prefab, m_editor);
 		cmd->transforms.push({pos, rot, scale});
-		prefab.getResourceManager().load(prefab);
-		cmd->prefab = &prefab;
-		m_editor.executeCommand(cmd);
-		if (cmd->entities.empty()) return INVALID_ENTITY;
-		return cmd->entities[0];
+		m_editor.executeCommand(cmd.move());
+		return res;
 	}
 
 
@@ -311,14 +309,14 @@ public:
 		return root;
 	}
 
-	struct PropertyCloner : Reflection::IPropertyVisitor {
+	struct PropertyCloner : reflection::IPropertyVisitor {
 		template <typename T>
-		void clone(const Reflection::Property<T>& prop) { prop.set(dst, index, prop.get(src, index)); }
+		void clone(const reflection::Property<T>& prop) { prop.set(dst, index, prop.get(src, index)); }
 
-		void visit(const Reflection::Property<float>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<int>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<u32>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<EntityPtr>& prop) override { 
+		void visit(const reflection::Property<float>& prop) override { clone(prop); }
+		void visit(const reflection::Property<int>& prop) override { clone(prop); }
+		void visit(const reflection::Property<u32>& prop) override { clone(prop); }
+		void visit(const reflection::Property<EntityPtr>& prop) override { 
 			EntityPtr e = prop.get(src, index);
 			auto iter = map->find(e);
 			if (iter.isValid()) {
@@ -328,35 +326,34 @@ public:
 				e = INVALID_ENTITY;
 			}
 			prop.set(dst, index, e);
-			clone(prop); 
 		}
-		void visit(const Reflection::Property<Vec2>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<Vec3>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<IVec3>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<Vec4>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<Path>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<bool>& prop) override { clone(prop); }
-		void visit(const Reflection::Property<const char*>& prop) override { clone(prop); }
+		void visit(const reflection::Property<Vec2>& prop) override { clone(prop); }
+		void visit(const reflection::Property<Vec3>& prop) override { clone(prop); }
+		void visit(const reflection::Property<IVec3>& prop) override { clone(prop); }
+		void visit(const reflection::Property<Vec4>& prop) override { clone(prop); }
+		void visit(const reflection::Property<Path>& prop) override { clone(prop); }
+		void visit(const reflection::Property<bool>& prop) override { clone(prop); }
+		void visit(const reflection::Property<const char*>& prop) override { clone(prop); }
 		
-		void visit(const Reflection::IArrayProperty& prop) override {
-			const i32 c = prop.getCount(src);
+		void visit(const reflection::ArrayProperty& prop) override {
+			const u32 c = prop.getCount(src);
 			while (prop.getCount(dst) < c) { prop.addItem(dst, prop.getCount(dst) - 1); }
 			while (prop.getCount(dst) > c) { prop.removeItem(dst, prop.getCount(dst) - 1); }
 			
 			ASSERT(index == -1);
-			for (int i = 0; i < c; ++i) {
+			for (u32 i = 0; i < c; ++i) {
 				index = i;
-				prop.visit(*this);
+				prop.visitChildren(*this);
 			}
 			index = -1;
 		}
-
-		void visit(const Reflection::IDynamicProperties& prop) override { 
+		
+		void visit(const reflection::DynamicProperties& prop) override { 
 			for (u32 i = 0, c = prop.getCount(src, index); i < c; ++i) {
 				const char* name = prop.getName(src, index, i);
-				Reflection::IDynamicProperties::Type type = prop.getType(src, index, i);
-				Reflection::IDynamicProperties::Value val = prop.getValue(src, index, i);
-				if (type == Reflection::IDynamicProperties::ENTITY) {
+				reflection::DynamicProperties::Type type = prop.getType(src, index, i);
+				reflection::DynamicProperties::Value val = prop.getValue(src, index, i);
+				if (type == reflection::DynamicProperties::ENTITY) {
 					auto iter = map->find(val.e);
 					if (iter.isValid()) {
 						val.e = iter.value();
@@ -368,12 +365,15 @@ public:
 				prop.set(dst, index, name, type, val);
 			}
 		}
-		void visit(const Reflection::IBlobProperty& prop) override { 
+		
+
+		void visit(const reflection::BlobProperty& prop) override { 
 			OutputMemoryStream tmp(*allocator);
 			prop.getValue(src, index, tmp);
 			InputMemoryStream blob(tmp);
 			prop.setValue(dst, index, blob);
 		}
+		
 
 		const HashMap<EntityPtr, EntityPtr>* map; 
 		IAllocator* allocator;
@@ -383,8 +383,8 @@ public:
 	};
 
 
-	EntityRef cloneEntity(Universe& src_u, EntityRef src_e, Universe& dst_u, EntityPtr dst_parent, Ref<Array<EntityRef>> entities, const HashMap<EntityPtr, EntityPtr>& map) {
-		entities->push(src_e);
+	EntityRef cloneEntity(Universe& src_u, EntityRef src_e, Universe& dst_u, EntityPtr dst_parent, Array<EntityRef>& entities, const HashMap<EntityPtr, EntityPtr>& map) {
+		entities.push(src_e);
 		const EntityRef dst_e = (EntityRef)map[src_e];
 		if (dst_parent.isValid()) {
 			dst_u.setParent(dst_parent, dst_e);
@@ -410,7 +410,7 @@ public:
 		for (ComponentUID cmp = src_u.getFirstComponent(src_e); cmp.isValid(); cmp = src_u.getNextComponent(cmp)) {
 			dst_u.createComponent(cmp.type, dst_e);
 
-			const Reflection::ComponentBase* cmp_tpl = Reflection::getComponent(cmp.type);
+			const reflection::ComponentBase* cmp_tpl = reflection::getComponent(cmp.type);
 	
 			PropertyCloner property_cloner;
 			property_cloner.allocator = &m_editor.getAllocator();
@@ -425,12 +425,12 @@ public:
 		return dst_e;
 	}
 
-	void cloneHierarchy(const Universe& src, EntityRef src_e, Universe& dst, bool clone_siblings, Ref<HashMap<EntityPtr, EntityPtr>> map) {
+	void cloneHierarchy(const Universe& src, EntityRef src_e, Universe& dst, bool clone_siblings, HashMap<EntityPtr, EntityPtr>& map) {
 		const EntityPtr child = src.getFirstChild(src_e);
 		const EntityPtr sibling = src.getNextSibling(src_e);
 
 		const EntityRef dst_e = dst.createEntity({0, 0, 0}, Quat::IDENTITY);
-		map->insert(src_e, dst_e);
+		map.insert(src_e, dst_e);
 
 		if (child.isValid()) {
 			cloneHierarchy(src, (EntityRef)child, dst, true, map);
@@ -440,14 +440,14 @@ public:
 		}
 	}
 
-	Universe& createPrefabUniverse(EntityRef src_e, Ref<Array<EntityRef>> entities) {
+	Universe& createPrefabUniverse(EntityRef src_e, Array<EntityRef>& entities) {
 		Engine& engine = m_editor.getEngine();
 		Universe& dst = engine.createUniverse(false);
 		Universe& src = *m_editor.getUniverse();
 
 		HashMap<EntityPtr, EntityPtr> map(m_editor.getAllocator());
 		map.reserve(256);
-		cloneHierarchy(src, src_e, dst, false, Ref(map));
+		cloneHierarchy(src, src_e, dst, false, map);
 		cloneEntity(src, src_e, dst, INVALID_ENTITY, entities, map);
 		return dst;
 	}
@@ -496,10 +496,10 @@ public:
 
 		Engine& engine = m_editor.getEngine();
 		FileSystem& fs = engine.getFileSystem();
-		OS::OutputFile file;
-		if (!fs.open(path.c_str(), Ref(file)))
+		os::OutputFile file;
+		if (!fs.open(path.c_str(), file))
 		{
-			logError("Editor") << "Failed to create " << path.c_str();
+			logError("Failed to create ", path);
 			return;
 		}
 
@@ -507,12 +507,12 @@ public:
 		blob.reserve(4096);
 		Array<EntityRef> src_entities(m_editor.getAllocator());
 		src_entities.reserve(256);
-		Universe& prefab_universe = createPrefabUniverse(entity, Ref(src_entities));
+		Universe& prefab_universe = createPrefabUniverse(entity, src_entities);
 		engine.serialize(prefab_universe, blob);
 		engine.destroyUniverse(prefab_universe);
 
 		if (!file.write(blob.data(), blob.size())) {
-			logError("Editor") << "Failed to write " << path.c_str();
+			logError("Failed to write ", path.c_str());
 			file.close();
 			return;
 		}
@@ -596,8 +596,8 @@ public:
 		while (!m_deferred_instances.empty()) {
 			PrefabResource* res = m_deferred_instances.back().resource;
 			if (res->isFailure()) {
-				logError("Editor") << "Failed to instantiate " << res->getPath();
-				res->getResourceManager().unload(*res);
+				logError("Failed to instantiate ", res->getPath());
+				res->decRefCount();
 				m_deferred_instances.pop();
 			} else if (res->isReady()) {
 				DeferredInstance tmp = m_deferred_instances.back();
@@ -707,16 +707,9 @@ private:
 }; // struct PrefabSystemImpl
 
 
-PrefabSystem* PrefabSystem::create(WorldEditor& editor)
+UniquePtr<PrefabSystem> PrefabSystem::create(WorldEditor& editor)
 {
-	return LUMIX_NEW(editor.getAllocator(), PrefabSystemImpl)(editor);
-}
-
-
-void PrefabSystem::destroy(PrefabSystem* system)
-{
-	LUMIX_DELETE(
-		static_cast<PrefabSystemImpl*>(system)->getEditor().getAllocator(), system);
+	return UniquePtr<PrefabSystemImpl>::create(editor.getAllocator(), editor);
 }
 
 

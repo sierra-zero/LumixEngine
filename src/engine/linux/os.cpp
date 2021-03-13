@@ -1,10 +1,11 @@
-#include "engine/allocator.h"
+#include "engine/allocators.h"
 #include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/lumix.h"
 #include "engine/math.h"
 #include "engine/os.h"
 #include "engine/path.h"
+#include "engine/queue.h"
 #include "engine/string.h"
 #include <dlfcn.h>
 #include <dirent.h>
@@ -30,7 +31,7 @@
 
 #define _NET_WM_STATE_ADD           1
 
-namespace Lumix::OS
+namespace Lumix::os
 {
 
 
@@ -41,7 +42,7 @@ static const char* s_keycode_names[256];
 static struct
 {
 	bool finished = false;
-	Interface* iface = nullptr;
+	Queue<Event, 128> event_queue;
 	Point relative_mode_pos = {};
 	bool relative_mouse = false;
 	WindowHandle win = INVALID_WINDOW;
@@ -377,48 +378,6 @@ bool InputFile::seek(u64 pos)
 }
 
 
-OutputFile& OutputFile::operator <<(const char* text)
-{
-	write(text, stringLength(text));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(i32 value)
-{
-	char buf[20];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(u32 value)
-{
-	char buf[20];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(u64 value)
-{
-	char buf[30];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(float value)
-{
-	char buf[128];
-	toCString(value, Span(buf), 7);
-	write(buf, stringLength(buf));
-	return *this;
-}
-
 u32 getCPUsCount() { return sysconf(_SC_NPROCESSORS_ONLN); }
 void sleep(u32 milliseconds) { if (milliseconds) usleep(useconds_t(milliseconds * 1000)); }
 ThreadID getCurrentThreadID() { return pthread_self(); }
@@ -426,14 +385,14 @@ ThreadID getCurrentThreadID() { return pthread_self(); }
 void logVersion() {
     struct utsname tmp;
 	if (uname(&tmp) == 0) {
-		logInfo("Engine") << "sysname: " << tmp.sysname;
-		logInfo("Engine") << "nodename: " << tmp.nodename;
-		logInfo("Engine") << "release: " << tmp.release;
-		logInfo("Engine") << "version: " << tmp.version;
-		logInfo("Engine") << "machine: " << tmp.machine;
+		logInfo("sysname: ", tmp.sysname);
+		logInfo("nodename: ", tmp.nodename);
+		logInfo("release: ", tmp.release);
+		logInfo("version: ", tmp.version);
+		logInfo("machine: ", tmp.machine);
 	}
 	else {
-		logWarning("Engine") << "uname failed";
+		logWarning("uname failed");
 	}
 }
 
@@ -475,109 +434,112 @@ static unsigned long get_window_property(Window win, Atom property, Atom type, u
     return count;
 }
 
-static void processEvents()
-{
-	while (XPending(G.display) > 0) {
-		XEvent xevent;
-		XNextEvent(G.display, &xevent);
-		
-		if (XFilterEvent(&xevent, None)) continue;
-
-		Event e;
-		switch (xevent.type) {
-			case KeyPress: {
-				KeySym keysym;
-				Status status = 0;
-				u32 utf8;
-				const int len = Xutf8LookupString(G.ic, &xevent.xkey, (char*)&utf8, sizeof(utf8), &keysym, &status);
-
-				e.type = Event::Type::KEY;
-				e.key.down = true;
-				e.key.keycode = getKeycode(keysym);
-				G.key_states[(u8)e.key.keycode] = true;
-				G.iface->onEvent(e);
-
-				switch (status) {
-					case XLookupChars:
-					case XLookupBoth:
-						if (0 != len) {
-							e.type = Event::Type::CHAR;
-							e.text_input.utf8 = utf8;
-							G.iface->onEvent(e);
-						}
-					break;
-					default: break;
-				}
-				break;
-			}
-			case KeyRelease: {
-				const KeySym keysym = XLookupKeysym(&xevent.xkey, 0);
-				e.type = Event::Type::KEY;
-				e.key.down = false;
-				e.key.keycode = getKeycode(keysym);
-				G.key_states[(u8)e.key.keycode] = false;
-				G.iface->onEvent(e);
-				break;
-			}
-			case ButtonPress:
-			case ButtonRelease:
-				e.window = (WindowHandle)xevent.xbutton.window;
-				if (xevent.xbutton.button <= Button3) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					switch (xevent.xbutton.button) {
-						case Button1: e.mouse_button.button = MouseButton::LEFT; break;
-						case Button2: e.mouse_button.button = MouseButton::MIDDLE; break;
-						case Button3: e.mouse_button.button = MouseButton::RIGHT; break;
-						default: e.mouse_button.button = MouseButton::EXTENDED; break;
-					}
-					e.mouse_button.down = xevent.type == ButtonPress;
-					G.iface->onEvent(e);
-				}
-				else {
-					e.type = Event::Type::MOUSE_WHEEL;
-					switch (xevent.xbutton.button) {
-						case 4: e.mouse_wheel.amount = 1; break;
-						case 5: e.mouse_wheel.amount = -1; break;
-					}
-					G.iface->onEvent(e);
-				}
-				break;
-	        case ClientMessage:
-	            if (xevent.xclient.message_type == G.wm_protocols_atom) {
-					const Atom protocol = xevent.xclient.data.l[0];
-					if (protocol == G.wm_delete_window_atom) {
-						e.window = (WindowHandle)xevent.xclient.window;
-						e.type = Event::Type::WINDOW_CLOSE;
-						G.iface->onEvent(e);
-					}
-				}
-				break;
-			case ConfigureNotify:
-				e.window = (WindowHandle)xevent.xconfigure.window;
-
-				e.type = Event::Type::WINDOW_SIZE;
-				e.win_size.w = xevent.xconfigure.width;
-				e.win_size.h = xevent.xconfigure.height;
-				G.iface->onEvent(e);
-
-				e.type = Event::Type::WINDOW_MOVE;
-				e.win_move.x = xevent.xconfigure.x;
-				e.win_move.y = xevent.xconfigure.y;
-				G.iface->onEvent(e);
-				break;
-			case MotionNotify:
-				const IVec2 mp(xevent.xmotion.x, xevent.xmotion.y);
-				const IVec2 rel = mp - G.mouse_screen_pos;
-				G.mouse_screen_pos = mp;
-				e.window = (WindowHandle)xevent.xmotion.window;
-				e.type = Event::Type::MOUSE_MOVE;
-				e.mouse_move.xrel = rel.x;
-				e.mouse_move.yrel = rel.y;
-				G.iface->onEvent(e);
-				break;
-		}
+bool getEvent(Event& e) {
+	if (!G.event_queue.empty()) {
+		e = G.event_queue.front();
+		G.event_queue.pop();
+		return true;
 	}
 
+	next:
+	if (XPending(G.display) <= 0) return false;
+	XEvent xevent;
+	XNextEvent(G.display, &xevent);
+	
+	if (XFilterEvent(&xevent, None)) return false;
+
+	switch (xevent.type) {
+		default:
+			goto next;
+		case KeyPress: {
+			KeySym keysym;
+			Status status = 0;
+			u32 utf8 = 0;
+			const int len = Xutf8LookupString(G.ic, &xevent.xkey, (char*)&utf8, sizeof(utf8), &keysym, &status);
+
+			e.type = Event::Type::KEY;
+			e.key.down = true;
+			e.key.keycode = getKeycode(keysym);
+			G.key_states[(u8)e.key.keycode] = true;
+
+			switch (status) {
+				case XLookupChars:
+				case XLookupBoth:
+					if (0 != len) {
+						Event e2;
+						e2.type = Event::Type::CHAR;
+						e2.text_input.utf8 = utf8;
+						G.event_queue.push(e2);
+					}
+				break;
+				default: break;
+			}
+			return true;
+		}
+		case KeyRelease: {
+			const KeySym keysym = XLookupKeysym(&xevent.xkey, 0);
+			e.type = Event::Type::KEY;
+			e.key.down = false;
+			e.key.keycode = getKeycode(keysym);
+			G.key_states[(u8)e.key.keycode] = false;
+			return true;
+		}
+		case ButtonPress:
+		case ButtonRelease:
+			e.window = (WindowHandle)xevent.xbutton.window;
+			if (xevent.xbutton.button <= Button3) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				switch (xevent.xbutton.button) {
+					case Button1: e.mouse_button.button = MouseButton::LEFT; break;
+					case Button2: e.mouse_button.button = MouseButton::MIDDLE; break;
+					case Button3: e.mouse_button.button = MouseButton::RIGHT; break;
+					default: e.mouse_button.button = MouseButton::EXTENDED; break;
+				}
+				e.mouse_button.down = xevent.type == ButtonPress;
+			}
+			else {
+				e.type = Event::Type::MOUSE_WHEEL;
+				switch (xevent.xbutton.button) {
+					case 4: e.mouse_wheel.amount = 1; break;
+					case 5: e.mouse_wheel.amount = -1; break;
+				}
+			}
+			return true;
+		case ClientMessage:
+			if (xevent.xclient.message_type == G.wm_protocols_atom) {
+				const Atom protocol = xevent.xclient.data.l[0];
+				if (protocol == G.wm_delete_window_atom) {
+					e.window = (WindowHandle)xevent.xclient.window;
+					e.type = Event::Type::WINDOW_CLOSE;
+					return true;
+				}
+			}
+			goto next;
+		case ConfigureNotify: {
+			e.window = (WindowHandle)xevent.xconfigure.window;
+
+			e.type = Event::Type::WINDOW_SIZE;
+			e.win_size.w = xevent.xconfigure.width;
+			e.win_size.h = xevent.xconfigure.height;
+
+			Event e2;
+			e2.type = Event::Type::WINDOW_MOVE; //-V519
+			e2.win_move.x = xevent.xconfigure.x;
+			e2.win_move.y = xevent.xconfigure.y;
+			G.event_queue.push(e2);
+			return true;
+		}
+		case MotionNotify:
+			const IVec2 mp(xevent.xmotion.x, xevent.xmotion.y);
+			const IVec2 rel = mp - G.mouse_screen_pos;
+			G.mouse_screen_pos = mp;
+			e.window = (WindowHandle)xevent.xmotion.window;
+			e.type = Event::Type::MOUSE_MOVE;
+			e.mouse_move.xrel = rel.x;
+			e.mouse_move.yrel = rel.y;
+			return true;
+	}
+	return false;
 }
 
 
@@ -662,7 +624,12 @@ WindowHandle createWindow(const InitWindowArgs& args)
 	XSetWMProtocols(G.display, (Window)win, &protocols, 1);
 
 	// TODO glx context fails to create without this
-	for (int i = 0; i < 100; ++i) { processEvents(); }
+	for (int i = 0; i < 100; ++i) {
+		Event e;
+		if (getEvent(e)) {
+			G.event_queue.push(e);
+		} 
+	}
 
     WindowHandle res = (WindowHandle)win;
 	return res;
@@ -720,10 +687,10 @@ Rect getWindowScreenRect(WindowHandle win)
 	r.top = attrs.y;
 	r.width = attrs.width;
 	r.height = attrs.height;
-	XGetWindowAttributes(G.display, attrs.root, &attrs);
-	r.left += attrs.x;
-	r.top += attrs.y;
-    return r;
+   
+	Window dummy;
+	XTranslateCoordinates(G.display, (Window)win, attrs.root, 0, 0, &r.left, &r.top, &dummy);
+	return r;
 }
 
 Rect getWindowClientRect(WindowHandle win)
@@ -871,19 +838,6 @@ bool isRelativeMouseMode()
 	return G.relative_mouse;
 }
 
-
-void run(Interface& iface)
-{
-	G.iface = &iface;
-	G.iface->onInit();
-	while (!G.finished) {
-		processEvents();
-		G.iface->onIdle();
-	}
-
-	XCloseIM(G.im);
-	XCloseDisplay(G.display);
-}
 
 int getDPI() {
 	float dpi = DisplayWidth(G.display, 0) * 25.4f / DisplayWidthMM(G.display, 0);
@@ -1061,7 +1015,7 @@ u64 getLastModified(const char* path)
 
 bool makePath(const char* path)
 {
-	char tmp[MAX_PATH_LENGTH];
+	char tmp[LUMIX_MAX_PATH];
 	const char* cin = path;
 	char* cout = tmp;
 

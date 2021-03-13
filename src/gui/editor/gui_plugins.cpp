@@ -15,7 +15,7 @@
 #include "engine/os.h"
 #include "engine/path.h"
 #include "engine/reflection.h"
-#include "engine/serializer.h"
+#include "engine/resource_manager.h"
 #include "engine/universe.h"
 #include "gui/gui_scene.h"
 #include "gui/sprite.h"
@@ -32,11 +32,11 @@ namespace
 {
 
 
-static const ComponentType GUI_RECT_TYPE = Reflection::getComponentType("gui_rect");
-static const ComponentType GUI_IMAGE_TYPE = Reflection::getComponentType("gui_image");
-static const ComponentType GUI_TEXT_TYPE = Reflection::getComponentType("gui_text");
-static const ComponentType GUI_BUTTON_TYPE = Reflection::getComponentType("gui_button");
-static const ComponentType GUI_RENDER_TARGET_TYPE = Reflection::getComponentType("gui_render_target");
+static const ComponentType GUI_RECT_TYPE = reflection::getComponentType("gui_rect");
+static const ComponentType GUI_IMAGE_TYPE = reflection::getComponentType("gui_image");
+static const ComponentType GUI_TEXT_TYPE = reflection::getComponentType("gui_text");
+static const ComponentType GUI_BUTTON_TYPE = reflection::getComponentType("gui_button");
+static const ComponentType GUI_RENDER_TARGET_TYPE = reflection::getComponentType("gui_render_target");
 
 
 struct SpritePlugin final : AssetBrowser::IPlugin, AssetCompiler::IPlugin
@@ -57,9 +57,9 @@ struct SpritePlugin final : AssetBrowser::IPlugin, AssetCompiler::IPlugin
 	const char* getDefaultExtension() const override { return "spr"; }
 
 	bool createResource(const char* path) override {
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (!file.open(path)) {
-			logError("GUI") << "Failed to create " << path;
+			logError("Failed to create ", path);
 			return false;
 		}
 
@@ -80,7 +80,7 @@ struct SpritePlugin final : AssetBrowser::IPlugin, AssetCompiler::IPlugin
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_EXTERNAL_LINK_ALT "Open externally")) m_app.getAssetBrowser().openInExternalEditor(sprite);
 
-		char tmp[MAX_PATH_LENGTH];
+		char tmp[LUMIX_MAX_PATH];
 		Texture* tex = sprite->getTexture();
 		copyString(tmp, tex ? tex->getPath().c_str() : "");
 		ImGuiEx::Label("Texture");
@@ -131,7 +131,7 @@ struct SpritePlugin final : AssetBrowser::IPlugin, AssetCompiler::IPlugin
 		ImDrawList* draw = ImGui::GetWindowDrawList();
 		ImVec2 a = ImGui::GetItemRectMin();
 		ImVec2 b = ImGui::GetItemRectMax();
-		draw->AddImage((ImTextureID)(intptr_t)texture->handle.value, a, b);
+		draw->AddImage(texture->handle, a, b);
 
 		auto drawHandle = [&](const char* id, const ImVec2& a, const ImVec2& b, int* value, bool vertical) {
 			const float SIZE = 5;
@@ -196,7 +196,7 @@ struct SpritePlugin final : AssetBrowser::IPlugin, AssetCompiler::IPlugin
 			if (!sprite.save(*file))
 			{
 				success = false;
-				logError("Editor") << "Could not save file " << sprite.getPath().c_str();
+				logError("Could not save file ", sprite.getPath());
 			}
 			m_app.getAssetBrowser().endSaveResource(sprite, *file, success);
 		}
@@ -233,22 +233,23 @@ public:
 	{
 		IAllocator& allocator = app.getAllocator();
 
-		Action* action = LUMIX_NEW(allocator, Action)("GUI Editor", "Toggle gui editor", "gui_editor");
-		action->func.bind<&GUIEditor::onAction>(this);
-		action->is_selected.bind<&GUIEditor::isOpen>(this);
-		app.addWindowAction(action);
+		m_toggle_ui.init("GUI Editor", "Toggle gui editor", "gui_editor", "", true);
+		m_toggle_ui.func.bind<&GUIEditor::onAction>(this);
+		m_toggle_ui.is_selected.bind<&GUIEditor::isOpen>(this);
+		app.addWindowAction(&m_toggle_ui);
+	}
 
-		m_editor = &app.getWorldEditor();
-		Engine& engine = app.getEngine();
+	void init() {
+		m_editor = &m_app.getWorldEditor();
+		Engine& engine = m_app.getEngine();
 		Renderer& renderer = *static_cast<Renderer*>(engine.getPluginManager().getPlugin("renderer"));
 		PipelineResource* pres = engine.getResourceManager().load<PipelineResource>(Path("pipelines/gui_editor.pln"));
-		m_pipeline = Pipeline::create(renderer, pres, "", allocator);
+		m_pipeline = Pipeline::create(renderer, pres, "", m_app.getAllocator());
 	}
 
 
-	~GUIEditor()
-	{
-		Pipeline::destroy(m_pipeline);
+	~GUIEditor() {
+		m_app.removeAction(&m_toggle_ui);
 	}
 
 
@@ -350,7 +351,7 @@ private:
 
 		void set(GUIScene* scene, EntityRef e, const char* prop_name)
 		{
-			const bool found = Reflection::getPropertyValue(*scene, e, GUI_RECT_TYPE, prop_name, Ref(value));
+			const bool found = reflection::getPropertyValue(*scene, e, GUI_RECT_TYPE, prop_name, value);
 			ASSERT(found);
 			prop = prop_name;
 		}
@@ -395,7 +396,7 @@ private:
 
 	void paste(EntityRef e)
 	{
-		m_editor->beginCommandGroup(crc32("gui_editor_paste"));
+		m_editor->beginCommandGroup("gui_editor_paste");
 		for (int i = 0; i < m_copy_position_buffer_count; ++i)
 		{
 			CopyPositionBufferItem& item = m_copy_position_buffer[i];
@@ -436,7 +437,7 @@ private:
 				{
 					case MouseMode::RESIZE:
 					{
-						m_editor->beginCommandGroup(crc32("gui_mouse_resize"));
+						m_editor->beginCommandGroup("gui_mouse_resize");
 						float b = m_bottom_right_start_transform.y + ImGui::GetMouseDragDelta(0).y;
 						setRectProperty(e, "Bottom Points", b);
 						float r = m_bottom_right_start_transform.x + ImGui::GetMouseDragDelta(0).x;
@@ -446,7 +447,7 @@ private:
 					break;
 					case MouseMode::MOVE:
 					{
-						m_editor->beginCommandGroup(crc32("gui_mouse_move"));
+						m_editor->beginCommandGroup("gui_mouse_move");
 						float b = m_bottom_right_start_transform.y + ImGui::GetMouseDragDelta(0).y;
 						setRectProperty(e, "Bottom Points", b);
 						float r = m_bottom_right_start_transform.x + ImGui::GetMouseDragDelta(0).x;
@@ -470,13 +471,12 @@ private:
 			if (m_pipeline->render(true)) {
 				m_texture_handle = m_pipeline->getOutput();
 
-				if(m_texture_handle.isValid()) {
-					const ImTextureID img = (ImTextureID)(uintptr)m_texture_handle.value;
+				if(m_texture_handle) {
 					if (gpu::isOriginBottomLeft()) {
-						ImGui::Image(img, size, ImVec2(0, 1), ImVec2(1, 0));
+						ImGui::Image(m_texture_handle, size, ImVec2(0, 1), ImVec2(1, 0));
 					}
 					else {
-						ImGui::Image(img, size);
+						ImGui::Image(m_texture_handle, size);
 					}
 				}
 			}
@@ -613,7 +613,7 @@ private:
 		const EntityRef e = selected[0];
 
 		GUIScene* scene = (GUIScene*)m_editor->getUniverse()->getScene(crc32("gui"));
-		m_editor->beginCommandGroup(crc32("layout_gui"));
+		m_editor->beginCommandGroup("layout_gui");
 
 		u32 y = 0;
 		u32 col = 0;
@@ -644,7 +644,7 @@ private:
 
 	void createChild(EntityRef entity, ComponentType child_type)
 	{
-		m_editor->beginCommandGroup(crc32("create_gui_rect_child"));
+		m_editor->beginCommandGroup("create_gui_rect_child");
 		EntityRef child = m_editor->addEntity();
 		m_editor->makeParent(entity, child);
 		m_editor->selectEntities(Span(&child, 1), false);
@@ -669,7 +669,7 @@ private:
 		GUIScene::Rect parent_rect = scene->getRectEx(parent, canvas_size);
 		GUIScene::Rect child_rect = scene->getRectEx(entity, canvas_size);
 
-		m_editor->beginCommandGroup(crc32("make_gui_rect_absolute"));
+		m_editor->beginCommandGroup("make_gui_rect_absolute");
 
 		if (mask & (u8)EdgeMask::TOP) {
 			setRectProperty(entity, "Top Relative", 0);
@@ -697,7 +697,7 @@ private:
 	void anchor(EntityRef entity, u8 mask) {
 		GUIScene* scene = (GUIScene*)m_editor->getUniverse()->getScene(crc32("gui"));
 
-		m_editor->beginCommandGroup(crc32("anchor_gui_rect"));
+		m_editor->beginCommandGroup("anchor_gui_rect");
 
 		float br = scene->getRectBottomRelative(entity);
 		float tr = scene->getRectTopRelative(entity);
@@ -741,7 +741,7 @@ private:
 	{
 		GUIScene* scene = (GUIScene*)m_editor->getUniverse()->getScene(crc32("gui"));
 
-		m_editor->beginCommandGroup(crc32("align_gui_rect"));
+		m_editor->beginCommandGroup("align_gui_rect");
 
 		float br = scene->getRectBottomRelative(entity);
 		float bp = scene->getRectBottomPoints(entity);
@@ -805,7 +805,7 @@ private:
 
 	void expand(EntityRef entity, u8 mask)
 	{
-		m_editor->beginCommandGroup(crc32("expand_gui_rect"));
+		m_editor->beginCommandGroup("expand_gui_rect");
 
 		if (mask & (u8)EdgeMask::TOP)
 		{
@@ -844,7 +844,7 @@ private:
 		GUIScene::Rect parent_rect = scene->getRectEx(parent, canvas_size);
 		GUIScene::Rect child_rect = scene->getRectEx(entity, canvas_size);
 
-		m_editor->beginCommandGroup(crc32("make_gui_rect_relative"));
+		m_editor->beginCommandGroup("make_gui_rect_relative");
 		
 		if (mask & (u8)EdgeMask::TOP)
 		{
@@ -875,13 +875,13 @@ private:
 	}
 
 
-	bool hasFocus() override { return false; }
 	void update(float) override {}
 	const char* getName() const override { return "gui_editor"; }
 
 
 	StudioApp& m_app;
-	Pipeline* m_pipeline = nullptr;
+	Action m_toggle_ui;
+	UniquePtr<Pipeline> m_pipeline;
 	WorldEditor* m_editor = nullptr;
 	bool m_is_window_open = false;
 	gpu::TextureHandle m_texture_handle;
@@ -895,6 +895,8 @@ struct StudioAppPlugin : StudioApp::IPlugin
 {
 	StudioAppPlugin(StudioApp& app)
 		: m_app(app)
+		, m_sprite_plugin(app)
+		, m_gui_editor(app)
 	{
 	}
 
@@ -903,44 +905,30 @@ struct StudioAppPlugin : StudioApp::IPlugin
 	bool dependsOn(IPlugin& plugin) const override { return equalStrings(plugin.getName(), "renderer"); }
 
 
-	void init() override
-	{
-		m_app.registerComponent("", "gui_button", "GUI / Button");
-		m_app.registerComponent("", "gui_canvas", "GUI / Canvas");
-		m_app.registerComponent(ICON_FA_IMAGE, "gui_image", "GUI / Image", Sprite::TYPE, "Sprite");
-		m_app.registerComponent(ICON_FA_KEYBOARD, "gui_input_field", "GUI / Input field");
-		m_app.registerComponent("", "gui_rect", "GUI / Rect");
-		m_app.registerComponent("", "gui_render_target", "GUI / Render target");
-		m_app.registerComponent(ICON_FA_FONT, "gui_text", "GUI / Text");
+	void init() override {
+		m_gui_editor.init();
 
-		IAllocator& allocator = m_app.getAllocator();
-		m_gui_editor = LUMIX_NEW(allocator, GUIEditor)(m_app);
-		m_app.addPlugin(*m_gui_editor);
+		m_app.addPlugin(m_gui_editor);
 
-		m_sprite_plugin = LUMIX_NEW(allocator, SpritePlugin)(m_app);
-		m_app.getAssetBrowser().addPlugin(*m_sprite_plugin);
+		m_app.getAssetBrowser().addPlugin(m_sprite_plugin);
 
-		const char* sprite_exts[] = { "spr", nullptr };
-		m_app.getAssetCompiler().addPlugin(*m_sprite_plugin, sprite_exts);
+		const char* sprite_exts[] = {"spr", nullptr};
+		m_app.getAssetCompiler().addPlugin(m_sprite_plugin, sprite_exts);
 	}
 
 	bool showGizmo(UniverseView&, ComponentUID) override { return false; }
 	
-	~StudioAppPlugin()
-	{
-		IAllocator& allocator = m_app.getAllocator();
-		m_app.removePlugin(*m_gui_editor);
-		LUMIX_DELETE(allocator, m_gui_editor);
+	~StudioAppPlugin() {
+		m_app.removePlugin(m_gui_editor);
 
-		m_app.getAssetCompiler().removePlugin(*m_sprite_plugin);
-		m_app.getAssetBrowser().removePlugin(*m_sprite_plugin);
-		LUMIX_DELETE(allocator, m_sprite_plugin);
+		m_app.getAssetCompiler().removePlugin(m_sprite_plugin);
+		m_app.getAssetBrowser().removePlugin(m_sprite_plugin);
 	}
 
 
 	StudioApp& m_app;
-	GUIEditor* m_gui_editor;
-	SpritePlugin* m_sprite_plugin;
+	GUIEditor m_gui_editor;
+	SpritePlugin m_sprite_plugin;
 };
 
 

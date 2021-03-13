@@ -285,21 +285,21 @@ struct AudioDeviceImpl : AudioDevice
 			LUMIX_DELETE(m_allocator, m_task);
 		}
 		if (m_device) m_api.snd_pcm_close(m_device);
-		if (m_alsa_lib) OS::unloadLibrary(m_alsa_lib);
+		if (m_alsa_lib) os::unloadLibrary(m_alsa_lib);
 	}
 
 
 	bool loadAlsa()
 	{
-		m_alsa_lib = OS::loadLibrary("libasound.so");
+		m_alsa_lib = os::loadLibrary("libasound.so");
 		if (!m_alsa_lib) return false;
 
 		#define API(func) \
 			do { \
-				m_api.func = (decltype(m_api.func))OS::getLibrarySymbol(m_alsa_lib, #func);\
+				m_api.func = (decltype(m_api.func))os::getLibrarySymbol(m_alsa_lib, #func);\
 				if(!m_api.func)\
 				{\
-					OS::unloadLibrary(m_alsa_lib);\
+					os::unloadLibrary(m_alsa_lib);\
 					m_alsa_lib = nullptr;\
 					return false;\
 				}\
@@ -359,8 +359,8 @@ struct AudioDeviceImpl : AudioDevice
 		res = m_api.snd_pcm_start(m_device);
 		if(res < 0) goto error;
 
-		logInfo("Audio") << "PCM name: '" << m_api.snd_pcm_name(m_device) << "'";
-		logInfo("Audio") << "PCM state: '" << m_api.snd_pcm_state(m_device) << "'";
+		logInfo("PCM name: '", m_api.snd_pcm_name(m_device), "'");
+		logInfo("PCM state: '", m_api.snd_pcm_state(m_device), "'");
 
 		m_task = LUMIX_NEW(m_allocator, AudioTask)(*this, m_allocator);
 		m_task->create("AudioTask", true);
@@ -369,7 +369,7 @@ struct AudioDeviceImpl : AudioDevice
 
 		error:
 			const char* error_msg = m_api.snd_strerror(res);
-			logError("Audio") << error_msg;
+			logError(error_msg);
 			return false;
 	}
 
@@ -416,7 +416,7 @@ struct AudioDeviceImpl : AudioDevice
 void AudioTask::handleError(int error_code)
 {
 	const char* error_msg = m_device.m_api.snd_strerror(error_code);
-	logError("Audio") << error_msg;
+	logError(error_msg);
 }
 
 
@@ -514,24 +514,16 @@ struct NullAudioDevice final : AudioDevice
 static NullAudioDevice g_null_device;
 
 
-AudioDevice* AudioDevice::create(Engine& engine)
+UniquePtr<AudioDevice> AudioDevice::create(Engine& engine)
 {
-	auto* device = LUMIX_NEW(engine.getAllocator(), AudioDeviceImpl)(engine);
-	if (!device->init())
-	{
-		LUMIX_DELETE(engine.getAllocator(), device);
-		logWarning("Audio") << "Using null device";
-		return &g_null_device;
+	UniquePtr<AudioDeviceImpl> device = UniquePtr<AudioDeviceImpl>::create(engine.getAllocator(), engine);
+	if (!device->init()) {
+		logWarning("Using null device");
+		return UniquePtr<NullAudioDevice>::create(engine.getAllocator());
 	}
 	return device;
 }
 
-
-void AudioDevice::destroy(AudioDevice& device)
-{
-	if (&device == &g_null_device) return;
-	LUMIX_DELETE(static_cast<AudioDeviceImpl&>(device).m_engine.getAllocator(), &device);
-}
 
 
 } // namespace Lumix

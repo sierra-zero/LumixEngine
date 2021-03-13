@@ -7,6 +7,25 @@
 namespace Lumix
 {
 
+Sphere::Sphere() {}
+
+Sphere::Sphere(float x, float y, float z, float _radius)
+	: position(x, y, z)
+	, radius(_radius)
+{
+}
+
+Sphere::Sphere(const Vec3& point, float _radius)
+	: position(point)
+	, radius(_radius)
+{
+}
+
+Sphere::Sphere(const Vec4& sphere)
+	: position(sphere.x, sphere.y, sphere.z)
+	, radius(sphere.w)
+{
+}
 
 Frustum::Frustum()
 {
@@ -16,6 +35,25 @@ Frustum::Frustum()
 	ds[6] = ds[7] = 0;
 }
 
+bool ShiftedFrustum::intersectNearPlane(const DVec3& center, float radius) const {
+	const float x = float(center.x - origin.x);
+	const float y = float(center.y - origin.y);
+	const float z = float(center.z - origin.z);
+	const u32 i = (u32)Frustum::Planes::NEAR;
+	float distance = xs[i] * x + ys[i] * y + z * zs[i] + ds[i];
+	distance = distance < 0 ? -distance : distance;
+	return distance < radius;
+}
+
+bool Frustum::intersectNearPlane(const Vec3& center, float radius) const {
+	float x = center.x;
+	float y = center.y;
+	float z = center.z;
+	u32 i = (u32)Planes::NEAR;
+	float distance = xs[i] * x + ys[i] * y + z * zs[i] + ds[i];
+	distance = distance < 0 ? -distance : distance;
+	return distance < radius;
+}
 
 bool Frustum::intersectAABB(const AABB& aabb) const
 {
@@ -40,7 +78,7 @@ bool Frustum::intersectAABB(const AABB& aabb) const
 
 bool ShiftedFrustum::containsAABB(const DVec3& pos, const Vec3& size) const
 {
-	const Vec3 rel_pos = (pos - origin).toFloat();
+	const Vec3 rel_pos = Vec3(pos - origin);
 	Vec3 box[] = { rel_pos, rel_pos + size };
 
 	for (int i = 0; i < 6; ++i)
@@ -63,7 +101,7 @@ bool ShiftedFrustum::containsAABB(const DVec3& pos, const Vec3& size) const
 Frustum ShiftedFrustum::getRelative(const DVec3& origin) const
 {
 	Frustum res;
-	const Vec3 offset = (this->origin - origin).toFloat();
+	const Vec3 offset = Vec3(this->origin - origin);
 	memcpy(res.points, points, sizeof(points));
 	for(Vec3& p : res.points) {
 		p += offset;
@@ -75,7 +113,7 @@ Frustum ShiftedFrustum::getRelative(const DVec3& origin) const
 
 bool ShiftedFrustum::intersectsAABB(const DVec3& pos, const Vec3& size) const
 {
-	const Vec3 rel_pos = (pos - origin).toFloat();
+	const Vec3 rel_pos = Vec3(pos - origin);
 	Vec3 box[] = { rel_pos, rel_pos + size };
 
 	for (int i = 0; i < 6; ++i)
@@ -105,9 +143,9 @@ void Frustum::transform(const Matrix& mtx)
 	for (u32 i = 0; i < lengthOf(xs); ++i)
 	{
 		Vec3 p;
-		if (xs[i] != 0) p.set(-ds[i] / xs[i], 0, 0);
-		else if (ys[i] != 0) p.set(0, -ds[i] / ys[i], 0);
-		else p.set(0, 0, -ds[i] / zs[i]);
+		if (xs[i] != 0) p = Vec3(-ds[i] / xs[i], 0, 0);
+		else if (ys[i] != 0) p = Vec3(0, -ds[i] / ys[i], 0);
+		else p = Vec3(0, 0, -ds[i] / zs[i]);
 
 		Vec3 n = {xs[i], ys[i], zs[i]};
 		n = mtx.transformVector(n);
@@ -116,7 +154,7 @@ void Frustum::transform(const Matrix& mtx)
 		xs[i] = n.x;
 		ys[i] = n.y;
 		zs[i] = n.z;
-		ds[i] = -dotProduct(p, n);
+		ds[i] = -dot(p, n);
 	}
 }
 
@@ -129,9 +167,9 @@ Frustum Frustum::transformed(const Matrix& mtx) const
 
 	for (u32 i = 0; i < lengthOf(xs); ++i) {
 		Vec3 p;
-		if (xs[i] != 0) p.set(-ds[i] / xs[i], 0, 0);
-		else if (ys[i] != 0) p.set(0, -ds[i] / ys[i], 0);
-		else p.set(0, 0, -ds[i] / zs[i]);
+		if (xs[i] != 0) p = Vec3(-ds[i] / xs[i], 0, 0);
+		else if (ys[i] != 0) p = Vec3(0, -ds[i] / ys[i], 0);
+		else p = Vec3(0, 0, -ds[i] / zs[i]);
 
 		Vec3 n = { xs[i], ys[i], zs[i] };
 		n = mtx.transformVector(n);
@@ -140,7 +178,7 @@ Frustum Frustum::transformed(const Matrix& mtx) const
 		res.xs[i] = n.x;
 		res.ys[i] = n.y;
 		res.zs[i] = n.z;
-		res.ds[i] = -dotProduct(p, n);
+		res.ds[i] = -dot(p, n);
 	}
 	return res;
 }
@@ -158,7 +196,7 @@ Sphere Frustum::computeBoundingSphere() const
 	sphere.radius = 0;
 	for (u32 i = 0; i < lengthOf(points); ++i)
 	{
-		float len_sq = (points[i] - sphere.position).squaredLength();
+		float len_sq = squaredLength(points[i] - sphere.position);
 		if (len_sq > sphere.radius) sphere.radius = len_sq;
 	}
 	sphere.radius = sqrtf(sphere.radius);
@@ -224,33 +262,33 @@ void ShiftedFrustum::computeOrtho(const DVec3& position,
 
 void Frustum::setPlanesFromPoints()
 {
-	Vec3 normal_near = -crossProduct(points[0] - points[1], points[0] - points[2]).normalized();
-	Vec3 normal_far = crossProduct(points[4] - points[5], points[4] - points[6]).normalized();
+	Vec3 normal_near = -normalize(cross(points[0] - points[1], points[0] - points[2]));
+	Vec3 normal_far = normalize(cross(points[4] - points[5], points[4] - points[6]));
 	setPlane(Frustum::Planes::EXTRA0, normal_near, points[0]);
 	setPlane(Frustum::Planes::EXTRA1, normal_near, points[0]);
 	setPlane(Frustum::Planes::NEAR, normal_near, points[0]);
 	setPlane(Frustum::Planes::FAR, normal_far, points[4]);
 
-	setPlane(Frustum::Planes::LEFT, crossProduct(points[1] - points[2], points[1] - points[5]).normalized(), points[1]);
-	setPlane(Frustum::Planes::RIGHT, -crossProduct(points[0] - points[3], points[0] - points[4]).normalized(), points[0]);
-	setPlane(Frustum::Planes::TOP, crossProduct(points[0] - points[1], points[0] - points[4]).normalized(), points[0]);
-	setPlane(Frustum::Planes::BOTTOM, crossProduct(points[2] - points[3], points[2] - points[6]).normalized(), points[2]);
+	setPlane(Frustum::Planes::LEFT, normalize(cross(points[1] - points[2], points[1] - points[5])), points[1]);
+	setPlane(Frustum::Planes::RIGHT, -normalize(cross(points[0] - points[3], points[0] - points[4])), points[0]);
+	setPlane(Frustum::Planes::TOP, normalize(cross(points[0] - points[1], points[0] - points[4])), points[0]);
+	setPlane(Frustum::Planes::BOTTOM, normalize(cross(points[2] - points[3], points[2] - points[6])), points[2]);
 }
 
 
 void ShiftedFrustum::setPlanesFromPoints()
 {
-	Vec3 normal_near = -crossProduct(points[0] - points[1], points[0] - points[2]).normalized();
-	Vec3 normal_far = crossProduct(points[4] - points[5], points[4] - points[6]).normalized();
+	Vec3 normal_near = -normalize(cross(points[0] - points[1], points[0] - points[2]));
+	Vec3 normal_far = normalize(cross(points[4] - points[5], points[4] - points[6]));
 	setPlane(Frustum::Planes::EXTRA0, normal_near, points[0]);
 	setPlane(Frustum::Planes::EXTRA1, normal_near, points[0]);
 	setPlane(Frustum::Planes::NEAR, normal_near, points[0]);
 	setPlane(Frustum::Planes::FAR, normal_far, points[4]);
 
-	setPlane(Frustum::Planes::LEFT, crossProduct(points[1] - points[2], points[1] - points[5]).normalized(), points[1]);
-	setPlane(Frustum::Planes::RIGHT, -crossProduct(points[0] - points[3], points[0] - points[4]).normalized(), points[0]);
-	setPlane(Frustum::Planes::TOP, crossProduct(points[0] - points[1], points[0] - points[4]).normalized(), points[0]);
-	setPlane(Frustum::Planes::BOTTOM, crossProduct(points[2] - points[3], points[2] - points[6]).normalized(), points[2]);
+	setPlane(Frustum::Planes::LEFT, normalize(cross(points[1] - points[2], points[1] - points[5])), points[1]);
+	setPlane(Frustum::Planes::RIGHT, -normalize(cross(points[0] - points[3], points[0] - points[4])), points[0]);
+	setPlane(Frustum::Planes::TOP, normalize(cross(points[0] - points[1], points[0] - points[4])), points[0]);
+	setPlane(Frustum::Planes::BOTTOM, normalize(cross(points[2] - points[3], points[2] - points[6])), points[2]);
 }
 
 template <typename T>
@@ -293,13 +331,12 @@ void Frustum::computeOrtho(const Vec3& position,
 	const Vec2& viewport_min,
 	const Vec2& viewport_max)
 {
-	Vec3 z = direction;
-	z.normalize();
+	Vec3 z = normalize(direction);
 	Vec3 near_center = position - z * near_distance;
 	Vec3 far_center = position - z * far_distance;
 
-	Vec3 x = crossProduct(up, z).normalized() * width;
-	Vec3 y = crossProduct(z, x).normalized() * height;
+	Vec3 x = normalize(cross(up, z)) * width;
+	Vec3 y = normalize(cross(z, x)) * height;
 
 	setPoints(*this, near_center, far_center, x, y, x, y, viewport_min, viewport_max);
 }
@@ -315,14 +352,13 @@ void ShiftedFrustum::computeOrtho(const DVec3& position,
 	const Vec2& viewport_min,
 	const Vec2& viewport_max)
 {
-	Vec3 z = direction;
-	z.normalize();
+	Vec3 z = normalize(direction);
 	origin = position;
 	Vec3 near_center = - z * near_distance;
 	Vec3 far_center = - z * far_distance;
 
-	Vec3 x = crossProduct(up, z).normalized() * width;
-	Vec3 y = crossProduct(z, x).normalized() * height;
+	Vec3 x = normalize(cross(up, z)) * width;
+	Vec3 y = normalize(cross(z, x)) * height;
 
 	setPoints(*this, near_center, far_center, x, y, x, y, viewport_min, viewport_max);
 }
@@ -333,7 +369,7 @@ void Frustum::setPlane(Planes side, const Vec3& normal, const Vec3& point)
 	xs[(u32)side] = normal.x;
 	ys[(u32)side] = normal.y;
 	zs[(u32)side] = normal.z;
-	ds[(u32)side] = -dotProduct(point, normal);
+	ds[(u32)side] = -dot(point, normal);
 }
 
 
@@ -342,7 +378,7 @@ void ShiftedFrustum::setPlane(Frustum::Planes side, const Vec3& normal, const Ve
 	xs[(u32)side] = normal.x;
 	ys[(u32)side] = normal.y;
 	zs[(u32)side] = normal.z;
-	ds[(u32)side] = -dotProduct(point, normal);
+	ds[(u32)side] = -dot(point, normal);
 }
 
 
@@ -371,13 +407,13 @@ void Frustum::computePerspective(const Vec3& position,
 	ASSERT(fov > 0);
 	ASSERT(ratio > 0);
 	float scale = (float)tan(fov * 0.5f);
-	Vec3 right = crossProduct(direction, up);
+	Vec3 right = cross(direction, up);
 	Vec3 up_near = up * near_distance * scale;
 	Vec3 right_near = right * (near_distance * scale * ratio);
 	Vec3 up_far = up * far_distance * scale;
 	Vec3 right_far = right * (far_distance * scale * ratio);
 
-	Vec3 z = direction.normalized();
+	Vec3 z = normalize(direction);
 
 	Vec3 near_center = position + z * near_distance;
 	Vec3 far_center = position + z * far_distance;
@@ -402,13 +438,13 @@ void ShiftedFrustum::computePerspective(const DVec3& position,
 	ASSERT(fov > 0);
 	ASSERT(ratio > 0);
 	const float scale = (float)tan(fov * 0.5f);
-	const Vec3 right = crossProduct(direction, up);
+	const Vec3 right = cross(direction, up);
 	const Vec3 up_near = up * near_distance * scale;
 	const Vec3 right_near = right * (near_distance * scale * ratio);
 	const Vec3 up_far = up * far_distance * scale;
 	const Vec3 right_far = right * (far_distance * scale * ratio);
 
-	const Vec3 z = direction.normalized();
+	const Vec3 z = normalize(direction);
 
 	const Vec3 near_center = z * near_distance;
 	const Vec3 far_center = z * far_distance;
@@ -439,18 +475,44 @@ void ShiftedFrustum::computePerspective(const DVec3& position,
 	computePerspective(position, direction, up, fov, ratio, near_distance, far_distance, {-1, -1}, {1, 1});
 }
 
+AABB::AABB() {}
+
+AABB::AABB(const Vec3& _min, const Vec3& _max)
+	: min(_min)
+	, max(_max)
+{}
+
+void AABB::merge(const AABB& rhs) {
+	addPoint(rhs.min);
+	addPoint(rhs.max);
+}
+
+void AABB::addPoint(const Vec3& point) {
+	min = minCoords(point, min);
+	max = maxCoords(point, max);
+}
+
+bool AABB::overlaps(const AABB& aabb) const {
+	if (min.x > aabb.max.x) return false;
+	if (min.y > aabb.max.y) return false;
+	if (min.z > aabb.max.z) return false;
+	if (aabb.min.x > max.x) return false;
+	if (aabb.min.y > max.y) return false;
+	if (aabb.min.z > max.z) return false;
+	return true;
+}
 
 void AABB::transform(const Matrix& matrix)
 {
 	Vec3 points[8];
 	points[0] = min;
 	points[7] = max;
-	points[1].set(points[0].x, points[0].y, points[7].z);
-	points[2].set(points[0].x, points[7].y, points[0].z);
-	points[3].set(points[0].x, points[7].y, points[7].z);
-	points[4].set(points[7].x, points[0].y, points[0].z);
-	points[5].set(points[7].x, points[0].y, points[7].z);
-	points[6].set(points[7].x, points[7].y, points[0].z);
+	points[1] = Vec3(points[0].x, points[0].y, points[7].z);
+	points[2] = Vec3(points[0].x, points[7].y, points[0].z);
+	points[3] = Vec3(points[0].x, points[7].y, points[7].z);
+	points[4] = Vec3(points[7].x, points[0].y, points[0].z);
+	points[5] = Vec3(points[7].x, points[0].y, points[7].z);
+	points[6] = Vec3(points[7].x, points[7].y, points[0].z);
 
 	for (int j = 0; j < 8; ++j)
 	{
@@ -474,19 +536,19 @@ void AABB::getCorners(const Matrix& matrix, Vec3* points) const
 {
 	Vec3 p(min.x, min.y, min.z);
 	points[0] = matrix.transformPoint(p);
-	p.set(min.x, min.y, max.z);
+	p = Vec3(min.x, min.y, max.z);
 	points[1] = matrix.transformPoint(p);
-	p.set(min.x, max.y, min.z);
+	p = Vec3(min.x, max.y, min.z);
 	points[2] = matrix.transformPoint(p);
-	p.set(min.x, max.y, max.z);
+	p = Vec3(min.x, max.y, max.z);
 	points[3] = matrix.transformPoint(p);
-	p.set(max.x, min.y, min.z);
+	p = Vec3(max.x, min.y, min.z);
 	points[4] = matrix.transformPoint(p);
-	p.set(max.x, min.y, max.z);
+	p = Vec3(max.x, min.y, max.z);
 	points[5] = matrix.transformPoint(p);
-	p.set(max.x, max.y, min.z);
+	p = Vec3(max.x, max.y, min.z);
 	points[6] = matrix.transformPoint(p);
-	p.set(max.x, max.y, max.z);
+	p = Vec3(max.x, max.y, max.z);
 	points[7] = matrix.transformPoint(p);
 }
 
@@ -545,16 +607,14 @@ Matrix Viewport::getProjection() const
 Matrix Viewport::getView(const DVec3& origin) const
 {
 	Matrix view = rot.toMatrix();
-	view.setTranslation((pos - origin).toFloat());
-	view.fastInverse();
-	return view;
+	view.setTranslation(Vec3(pos - origin));
+	return view.fastInverted();
 }
 
 
 Matrix Viewport::getViewRotation() const
 {
-	Matrix view = rot.toMatrix();
-	view.fastInverse();
+	Matrix view = rot.conjugated().toMatrix();
 	return view;
 }
 
@@ -582,15 +642,13 @@ void Viewport::getRay(const Vec2& screen_pos, DVec3& origin, Vec3& dir) const
 	}
 
 	const Matrix view_matrix = getView(origin);
-	Matrix inverted = (projection_matrix * view_matrix);
-	inverted.inverse();
+	const Matrix inverted = (projection_matrix * view_matrix).inverted();
 
 	Vec4 p0 = inverted * Vec4(nx, ny, -1, 1);
 	Vec4 p1 = inverted * Vec4(nx, ny, 1, 1);
 	p0 *= 1 / p0.w;
 	p1 *= 1 / p1.w;
-	dir = (p1 - p0).xyz();
-	dir.normalize();
+	dir = normalize((p1 - p0).xyz());
 	if (is_ortho) dir *= -1.f;
 }
 
@@ -667,5 +725,186 @@ ShiftedFrustum Viewport::getFrustum() const
 	return ret;
 }
 
+Vec4 makePlane(const Vec3& normal, const Vec3& point) {
+	ASSERT(squaredLength(normal) < 1.001f);
+	ASSERT(squaredLength(normal) > 0.999f);
+	return Vec4(normal, -dot(normal, point));
+}
+
+float planeDist(const Vec4& plane, const Vec3& point) {
+	return plane.x * point.x + plane.y * point.y + plane.z * point.z + plane.w;
+}
+
+bool getRayPlaneIntersecion(const Vec3& origin,
+	const Vec3& dir,
+	const Vec3& plane_point,
+	const Vec3& normal,
+	float& out)
+{
+	float d = dot(dir, normal);
+	if (d == 0)
+	{
+		return false;
+	}
+	d = dot(plane_point - origin, normal) / d;
+	out = d;
+	return true;
+}
+
+bool getRaySphereIntersection(const Vec3& origin,
+	const Vec3& dir,
+	const Vec3& center,
+	float radius,
+	float& out)
+{
+	ASSERT(length(dir) < 1.01f && length(dir) > 0.99f);
+	Vec3 L = center - origin;
+	float tca = dot(L, dir);
+	float d2 = dot(L, L) - tca * tca;
+	if (d2 > radius * radius) return false;
+	float thc = sqrtf(radius * radius - d2);
+	float t = tca - thc;
+	out = t >= 0 ? t : tca + thc;
+	return true;
+}
+
+bool getRayAABBIntersection(const Vec3& origin,
+	const Vec3& dir,
+	const Vec3& min,
+	const Vec3& size,
+	Vec3& out)
+{
+	Vec3 dirfrac;
+
+	dirfrac.x = 1.0f / (dir.x == 0 ? 0.00000001f : dir.x);
+	dirfrac.y = 1.0f / (dir.y == 0 ? 0.00000001f : dir.y);
+	dirfrac.z = 1.0f / (dir.z == 0 ? 0.00000001f : dir.z);
+
+	Vec3 max = min + size;
+	float t1 = (min.x - origin.x) * dirfrac.x;
+	float t2 = (max.x - origin.x) * dirfrac.x;
+	float t3 = (min.y - origin.y) * dirfrac.y;
+	float t4 = (max.y - origin.y) * dirfrac.y;
+	float t5 = (min.z - origin.z) * dirfrac.z;
+	float t6 = (max.z - origin.z) * dirfrac.z;
+
+	float tmin = maximum(
+		maximum(minimum(t1, t2), minimum(t3, t4)), minimum(t5, t6));
+	float tmax = minimum(
+		minimum(maximum(t1, t2), maximum(t3, t4)), maximum(t5, t6));
+
+	if (tmax < 0)
+	{
+		return false;
+	}
+
+	if (tmin > tmax)
+	{
+		return false;
+	}
+
+	out = tmin < 0 ? origin : origin + dir * tmin;
+	return true;
+}
+
+
+float getLineSegmentDistance(const Vec3& origin, const Vec3& dir, const Vec3& a, const Vec3& b)
+{
+	Vec3 a_origin = origin - a;
+	Vec3 ab = b - a;
+
+	float dot1 = dot(ab, a_origin);
+	float dot2 = dot(ab, dir);
+	float dot3 = dot(dir, a_origin);
+	float dot4 = dot(ab, ab);
+	float dot5 = dot(dir, dir);
+
+	float denom = dot4 * dot5 - dot2 * dot2;
+	if (fabsf(denom) < 1e-5f)
+	{
+		Vec3 X = origin + dir * dot(b - origin, dir);
+		return length(b - X);
+	}
+
+	float numer = dot1 * dot2 - dot3 * dot4;
+	float param_a = numer / denom;
+	float param_b = (dot1 + dot2 * param_a) / dot4;
+
+	if (param_b < 0 || param_b > 1)
+	{
+		param_b = clamp(param_b, 0.0f, 1.0f);
+		Vec3 B = a + ab * param_b;
+		Vec3 X = origin + dir * dot(b - origin, dir);
+		return length(B - X);
+	}
+
+	Vec3 vec = (origin + dir * param_a) - (a + ab * param_b);
+	return length(vec);
+}
+
+
+bool getRayTriangleIntersection(const Vec3& origin,
+	const Vec3& dir,
+	const Vec3& p0,
+	const Vec3& p1,
+	const Vec3& p2,
+	float* out_t)
+{
+	Vec3 normal = cross(p1 - p0, p2 - p0);
+	float q = dot(normal, dir);
+	if (q == 0) return false;
+
+	float d = -dot(normal, p0);
+	float t = -(dot(normal, origin) + d) / q;
+	if (t < 0) return false;
+
+	Vec3 hit_point = origin + dir * t;
+
+	Vec3 edge0 = p1 - p0;
+	Vec3 VP0 = hit_point - p0;
+	if (dot(normal, cross(edge0, VP0)) < 0)
+	{
+		return false;
+	}
+
+	Vec3 edge1 = p2 - p1;
+	Vec3 VP1 = hit_point - p1;
+	if (dot(normal, cross(edge1, VP1)) < 0)
+	{
+		return false;
+	}
+
+	Vec3 edge2 = p0 - p2;
+	Vec3 VP2 = hit_point - p2;
+	if (dot(normal, cross(edge2, VP2)) < 0)
+	{
+		return false;
+	}
+
+	if (out_t) *out_t = t;
+	return true;
+}
+
+
+LUMIX_ENGINE_API bool getSphereTriangleIntersection(const Vec3& center,
+	float radius,
+	const Vec3& v0,
+	const Vec3& v1,
+	const Vec3& v2)
+{
+	Vec3 normal = normalize(cross(v0 - v1, v2 - v1));
+	float D = -dot(v0, normal);
+
+	float dist = dot(center, normal) + D;
+
+	if (fabs(dist) > radius) return false;
+
+	float squared_radius = radius * radius;
+	if (squaredLength(v0 - center) < squared_radius) return true;
+	if (squaredLength(v1 - center) < squared_radius) return true;
+	if (squaredLength(v2 - center) < squared_radius) return true;
+
+	return false;
+}
 
 } // namespace Lumix

@@ -51,18 +51,16 @@ struct RawTextureHeader {
 };
 
 
-struct LUMIX_RENDERER_API Texture final : Resource
-{
-public: 
+struct LUMIX_RENDERER_API Texture final : Resource {
 	enum class Flags : u32 {
 		SRGB = 1 << 0,
 		CLAMP_U = 1 << 1,
 		CLAMP_V = 1 << 2,
 		CLAMP_W = 1 << 3,
 		POINT = 1 << 4,
+		ANISOTROPIC = 1 << 5
 	};
 
-public:
 	Texture(const Path& path, ResourceManager& resource_manager, Renderer& renderer, IAllocator& allocator);
 	~Texture();
 
@@ -83,9 +81,8 @@ public:
 	void setFlag(Flags flag, bool value);
 	u32 getPixelNearest(u32 x, u32 y) const;
 	u32 getPixel(float x, float y) const;
-	u32 getGPUFlags() const;
+	gpu::TextureFlags getGPUFlags() const;
 
-	static unsigned int compareTGA(IInputStream* file1, IInputStream* file2, int difference, IAllocator& allocator);
 	static bool saveTGA(IOutputStream* file,
 		int width,
 		int height,
@@ -97,7 +94,6 @@ public:
 
 	static const ResourceType TYPE;
 
-public:
 	u32 width;
 	u32 height;
 	u32 depth;

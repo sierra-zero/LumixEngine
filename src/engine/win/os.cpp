@@ -1,15 +1,17 @@
 #include "engine/allocator.h"
+#include "engine/allocators.h"
 #include "engine/log.h"
 #include "engine/lumix.h"
 #include "engine/os.h"
 #include "engine/path.h"
+#include "engine/queue.h"
 #include "engine/string.h"
 #define UNICODE
 #pragma warning(push)
 #pragma warning(disable : 4091)
-#include <ShlObj.h>
+#include <Shobjidl_core.h>
+#include <shlobj_core.h>
 #pragma warning(pop)
-#include <Windows.h>
 #pragma warning(disable : 4996)
 
 
@@ -20,17 +22,51 @@ extern "C" {
 }
 
 
-namespace Lumix::OS
+namespace Lumix::os
 {
 
+struct EventQueue {
+	struct Rec {
+		Event e;
+		Rec* prev;
+		Rec* next = nullptr;
+	};
+
+	void pushBack(const Event& e) {
+		Rec* n = LUMIX_NEW(allocator, Rec);
+		n->prev = back;
+		if (back) back->next = n;
+		back = n;
+		if (!front) front = n;
+		n->e = e;
+	}
+
+	Event popFront() {
+		ASSERT(front);
+		Event e = front->e;
+		Rec* tmp = front;
+		front = tmp->next;
+		if (!front) back = nullptr;
+		LUMIX_DELETE(allocator, tmp);
+		return e;
+	}
+
+	bool empty() const { 
+		return !front;
+	}
+
+	Rec* front = nullptr;
+	Rec* back = nullptr;
+	DefaultAllocator allocator;
+};
 
 static struct
 {
-	bool finished = false;
-	Interface* iface = nullptr;
+	EventQueue event_queue;
 	Point relative_mode_pos = {};
 	bool relative_mouse = false;
 	bool raw_input_registered = false;
+	u16 surrogate = 0;
 	struct {
 		HCURSOR load;
 		HCURSOR size_ns;
@@ -150,49 +186,6 @@ bool InputFile::seek(u64 pos)
 }
 
 
-OutputFile& OutputFile::operator <<(const char* text)
-{
-	write(text, stringLength(text));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(i32 value)
-{
-	char buf[20];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(u32 value)
-{
-	char buf[20];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(u64 value)
-{
-	char buf[30];
-	toCString(value, Span(buf));
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
-OutputFile& OutputFile::operator <<(float value)
-{
-	char buf[128];
-	toCString(value, Span(buf), 7);
-	write(buf, stringLength(buf));
-	return *this;
-}
-
-
 static void fromWChar(Span<char> out, const WCHAR* in)
 {
 	const WCHAR* c = in;
@@ -266,7 +259,7 @@ void logVersion() {
 
 	if (dwVersion < 0x80000000) dwBuild = (DWORD)(HIWORD(dwVersion));
 
-	logInfo("Engine") << "OS Version is " << (u32)dwMajorVersion << "." << (u32)dwMinorVersion << " (" << (u32)dwBuild << ")";
+	logInfo("OS Version is ", u32(dwMajorVersion), ".", u32(dwMinorVersion), " (", u32(dwBuild), ")");
 }
 
 
@@ -321,125 +314,152 @@ static void UTF32ToUTF8(u32 utf32, char* utf8)
 	}
 }
 
-static void processEvents()
-{
+bool getEvent(Event& event) {
+	if (!G.event_queue.empty()) {
+		event = G.event_queue.popFront();
+		return true;
+	}
+
+	retry:
 	MSG msg;
-	while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-		bool discard = false;
-		Event e;
-		e.window = msg.hwnd;
-		switch (msg.message) {
-			case WM_DROPFILES:
-				e.type = Event::Type::DROP_FILE;
-				e.file_drop.handle = (HDROP)msg.wParam;
-				G.iface->onEvent(e);
-				break;
-			case WM_QUIT: 
-				e.type = Event::Type::QUIT; 
-				G.iface->onEvent(e);
-				break;
-			case WM_CLOSE: 
-				e.type = Event::Type::WINDOW_CLOSE; 
-				G.iface->onEvent(e);
-				break;
-			case WM_SYSKEYDOWN:
-				discard = msg.wParam == VK_MENU;
-				break;
-			case WM_KEYDOWN:
-				e.type = Event::Type::KEY;
-				e.key.down = true;
-				e.key.keycode = (Keycode)msg.wParam;
-				G.iface->onEvent(e);
-				break;
-			case WM_KEYUP:
-				e.type = Event::Type::KEY;
-				e.key.down = false;
-				e.key.keycode = (Keycode)msg.wParam;
-				G.iface->onEvent(e);
-				break;
-			case WM_CHAR:
-				e.type = Event::Type::CHAR;
-				e.text_input.utf8 = 0;
-				UTF32ToUTF8((u32)msg.wParam, (char*)&e.text_input.utf8);
-				G.iface->onEvent(e);
-				break;
-			case WM_INPUT: {
-				HRAWINPUT hRawInput = (HRAWINPUT)msg.lParam;
-				UINT dataSize;
-				GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize, sizeof(RAWINPUTHEADER));
-				alignas(RAWINPUT) char dataBuf[1024];
-				if (dataSize == 0 || dataSize > sizeof(dataBuf)) break;
+	if (!PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) return false;
 
-				GetRawInputData(hRawInput, RID_INPUT, dataBuf, &dataSize, sizeof(RAWINPUTHEADER));
-
-				const RAWINPUT* raw = (const RAWINPUT*)dataBuf;
-				if (raw->header.dwType != RIM_TYPEMOUSE) break;
-
-				const RAWMOUSE& mouseData = raw->data.mouse;
-				const USHORT flags = mouseData.usButtonFlags;
-				const short wheel_delta = (short)mouseData.usButtonData;
-				const LONG x = mouseData.lLastX, y = mouseData.lLastY;
-
-				if (wheel_delta) {
-					e.mouse_wheel.amount = (float)wheel_delta / WHEEL_DELTA;
-					e.type = Event::Type::MOUSE_WHEEL;
-					G.iface->onEvent(e);
-				}
-
-				if(flags & RI_MOUSE_LEFT_BUTTON_DOWN) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::LEFT;
-					e.mouse_button.down = true;
-					G.iface->onEvent(e);
-				}
-				if(flags & RI_MOUSE_LEFT_BUTTON_UP) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::LEFT;
-					e.mouse_button.down = false;
-					G.iface->onEvent(e);
-				}
-					
-				if(flags & RI_MOUSE_RIGHT_BUTTON_UP) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::RIGHT;
-					e.mouse_button.down = false;
-					G.iface->onEvent(e);
-				}
-				if(flags & RI_MOUSE_RIGHT_BUTTON_DOWN) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::RIGHT;
-					e.mouse_button.down = true;
-					G.iface->onEvent(e);
-				}
-
-				if(flags & RI_MOUSE_MIDDLE_BUTTON_UP) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::MIDDLE;
-					e.mouse_button.down = false;
-					G.iface->onEvent(e);
-				}
-				if(flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) {
-					e.type = Event::Type::MOUSE_BUTTON;
-					e.mouse_button.button = MouseButton::MIDDLE;
-					e.mouse_button.down = true;
-					G.iface->onEvent(e);
-				}
-
-				if (x != 0 || y != 0) {
-					e.type = Event::Type::MOUSE_MOVE;
-					e.mouse_move.xrel = x;
-					e.mouse_move.yrel = y;
-					G.iface->onEvent(e);
-				}
-				break;
+	event.window = msg.hwnd;
+	switch (msg.message) {
+		case WM_DROPFILES:
+			event.type = Event::Type::DROP_FILE;
+			event.file_drop.handle = (HDROP)msg.wParam;
+			break;
+		case WM_QUIT: 
+			event.type = Event::Type::QUIT; 
+			break;
+		case WM_CLOSE: 
+			event.type = Event::Type::WINDOW_CLOSE; 
+			break;
+		case WM_SYSKEYDOWN:
+			if (msg.wParam == VK_MENU) goto retry;
+			break;
+		case WM_KEYDOWN:
+			event.type = Event::Type::KEY;
+			event.key.down = true;
+			event.key.keycode = (Keycode)msg.wParam;
+			break;
+		case WM_KEYUP:
+			event.type = Event::Type::KEY;
+			event.key.down = false;
+			event.key.keycode = (Keycode)msg.wParam;
+			break;
+		case WM_CHAR: {
+			event.type = Event::Type::CHAR;
+			event.text_input.utf8 = 0;
+			u32 c = (u32)msg.wParam;
+			if (c >= 0xd800 && c <= 0xdbff) {
+				G.surrogate = (u16)c;
+				goto retry;
 			}
-		}
 
-		if (!discard) {
+			if (c >= 0xdc00 && c <= 0xdfff) {
+				if (G.surrogate) {
+					c = (G.surrogate - 0xd800) << 10;
+					c += (WCHAR)msg.wParam - 0xdc00;
+					c += 0x10000;
+				}
+			}
+			G.surrogate = 0;
+
+			UTF32ToUTF8(c, (char*)&event.text_input.utf8);
+			break;
+		}
+		case WM_INPUT: {
+			HRAWINPUT hRawInput = (HRAWINPUT)msg.lParam;
+			UINT dataSize;
+			GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize, sizeof(RAWINPUTHEADER));
+			alignas(RAWINPUT) char dataBuf[1024];
+			if (dataSize == 0 || dataSize > sizeof(dataBuf)) break;
+
+			GetRawInputData(hRawInput, RID_INPUT, dataBuf, &dataSize, sizeof(RAWINPUTHEADER));
+
+			const RAWINPUT* raw = (const RAWINPUT*)dataBuf;
+			if (raw->header.dwType != RIM_TYPEMOUSE) break;
+
+			const RAWMOUSE& mouseData = raw->data.mouse;
+			const USHORT flags = mouseData.usButtonFlags;
+			const short wheel_delta = (short)mouseData.usButtonData;
+			const LONG x = mouseData.lLastX, y = mouseData.lLastY;
+
+			Event e;
+			if (wheel_delta) {
+				e.mouse_wheel.amount = (float)wheel_delta / WHEEL_DELTA;
+				e.type = Event::Type::MOUSE_WHEEL;
+				G.event_queue.pushBack(e);
+			}
+
+			if(flags & RI_MOUSE_LEFT_BUTTON_DOWN) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::LEFT;
+				e.mouse_button.down = true;
+				G.event_queue.pushBack(e);
+			}
+			if(flags & RI_MOUSE_LEFT_BUTTON_UP) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::LEFT;
+				e.mouse_button.down = false;
+				G.event_queue.pushBack(e);
+			}
+					
+			if(flags & RI_MOUSE_RIGHT_BUTTON_UP) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::RIGHT;
+				e.mouse_button.down = false;
+				G.event_queue.pushBack(e);
+			}
+			if(flags & RI_MOUSE_RIGHT_BUTTON_DOWN) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::RIGHT;
+				e.mouse_button.down = true;
+				G.event_queue.pushBack(e);
+			}
+
+			if(flags & RI_MOUSE_MIDDLE_BUTTON_UP) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::MIDDLE;
+				e.mouse_button.down = false;
+				G.event_queue.pushBack(e);
+			}
+			if(flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) {
+				e.type = Event::Type::MOUSE_BUTTON;
+				e.mouse_button.button = MouseButton::MIDDLE;
+				e.mouse_button.down = true;
+				G.event_queue.pushBack(e);
+			}
+
+			if (x != 0 || y != 0) {
+				e.type = Event::Type::MOUSE_MOVE;
+				e.mouse_move.xrel = x;
+				e.mouse_move.yrel = y;
+				G.event_queue.pushBack(e);
+			}
+				
+			if (G.event_queue.empty()) {
+				TranslateMessage(&msg);
+				DispatchMessage(&msg);
+				return false;
+			}
+
+			event = G.event_queue.popFront();
+
+			break;
+		}
+		default:
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
-		}
+			goto retry;
 	}
+
+	TranslateMessage(&msg);
+	DispatchMessage(&msg);
+
+	return true;
 }
 
 
@@ -461,10 +481,8 @@ Point toScreen(WindowHandle win, int x, int y)
 	return res;
 }
 
-WindowHandle createWindow(const InitWindowArgs& args)
-{
-	ASSERT(G.iface);
-	WCharStr<MAX_PATH_LENGTH> cls_name("lunex_window");
+WindowHandle createWindow(const InitWindowArgs& args) {
+	WCharStr<LUMIX_MAX_PATH> cls_name("lunex_window");
 	static WNDCLASS wc = [&]() -> WNDCLASS {
 		WNDCLASS wc = {};
 		auto WndProc = [](HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
@@ -476,17 +494,17 @@ WindowHandle createWindow(const InitWindowArgs& args)
 					e.type = Event::Type::WINDOW_MOVE;
 					e.win_move.x = (i16)LOWORD(lParam);
 					e.win_move.y = (i16)HIWORD(lParam);
-					G.iface->onEvent(e);
+					G.event_queue.pushBack(e);
 					return 0;
 				case WM_SIZE:
 					e.type = Event::Type::WINDOW_SIZE;
 					e.win_size.w = LOWORD(lParam);
 					e.win_size.h = HIWORD(lParam);
-					G.iface->onEvent(e);
+					G.event_queue.pushBack(e);
 					return 0;
 				case WM_CLOSE:
 					e.type = Event::Type::WINDOW_CLOSE;
-					G.iface->onEvent(e);
+					G.event_queue.pushBack(e);
 					return 0;
 				case WM_ACTIVATE:
 					if (wParam == WA_INACTIVE) {
@@ -495,7 +513,7 @@ WindowHandle createWindow(const InitWindowArgs& args)
 					}
 					e.type = Event::Type::FOCUS;
 					e.focus.gained = wParam != WA_INACTIVE;
-					G.iface->onEvent(e);
+					G.event_queue.pushBack(e);
 					break;
 			}
 			return DefWindowProc(hWnd, Msg, wParam, lParam);
@@ -520,7 +538,7 @@ WindowHandle createWindow(const InitWindowArgs& args)
 
 	HWND parent_window = (HWND)args.parent;
 
-	WCharStr<MAX_PATH_LENGTH> wname(args.name);
+	WCharStr<LUMIX_MAX_PATH> wname(args.name);
 	DWORD style =  args.flags & InitWindowArgs::NO_DECORATION ? WS_POPUP : WS_OVERLAPPEDWINDOW ;
 	DWORD ext_style = args.flags & InitWindowArgs::NO_TASKBAR_ICON ? WS_EX_TOOLWINDOW : WS_EX_APPWINDOW;
 	const HWND hwnd = CreateWindowEx(
@@ -558,12 +576,6 @@ WindowHandle createWindow(const InitWindowArgs& args)
 	}
 
 	return hwnd;
-}
-
-
-void quit()
-{
-	G.finished = true;
 }
 
 
@@ -742,12 +754,12 @@ bool isMaximized(WindowHandle win) {
 
 void restore(WindowHandle win, WindowState state) {
 	SetWindowLongPtr((HWND)win, GWL_STYLE, state.style);
-	OS::setWindowScreenRect(win, state.rect);
+	os::setWindowScreenRect(win, state.rect);
 }
 
 WindowState setFullscreen(WindowHandle win) {
 	WindowState res;
-	res.rect = OS::getWindowScreenRect(win);
+	res.rect = os::getWindowScreenRect(win);
 	res.style = SetWindowLongPtr((HWND)win, GWL_STYLE, WS_VISIBLE | WS_POPUP);
 	int w = GetSystemMetrics(SM_CXSCREEN);
 	int h = GetSystemMetrics(SM_CYSCREEN);
@@ -765,19 +777,6 @@ bool isRelativeMouseMode()
 {
 	return G.relative_mouse;
 }
-
-
-void run(Interface& iface)
-{
-	G.iface = &iface;
-	G.iface->onInit();
-	while (!G.finished)
-	{
-		processEvents();
-		G.iface->onIdle();
-	}
-}
-
 
 int getDPI()
 {
@@ -814,11 +813,11 @@ struct FileIterator
 
 FileIterator* createFileIterator(const char* path, IAllocator& allocator)
 {
-	char tmp[MAX_PATH_LENGTH];
+	char tmp[LUMIX_MAX_PATH];
 	copyString(tmp, path);
 	catString(tmp, "/*");
 	
-	WCharStr<MAX_PATH_LENGTH> wtmp(tmp);
+	WCharStr<LUMIX_MAX_PATH> wtmp(tmp);
 	auto* iter = LUMIX_NEW(allocator, FileIterator);
 	iter->allocator = &allocator;
 	iter->handle = FindFirstFile(wtmp, &iter->ffd);
@@ -848,14 +847,14 @@ bool getNextFile(FileIterator* iterator, FileInfo* info)
 
 void setCurrentDirectory(const char* path)
 {
-	WCharStr<MAX_PATH_LENGTH> tmp(path);
+	WCharStr<LUMIX_MAX_PATH> tmp(path);
 	SetCurrentDirectory(tmp);
 }
 
 
 void getCurrentDirectory(Span<char> output)
 {
-	WCHAR tmp[MAX_PATH_LENGTH];
+	WCHAR tmp[LUMIX_MAX_PATH];
 	GetCurrentDirectory(lengthOf(tmp), tmp);
 	fromWChar(output, tmp);
 }
@@ -863,12 +862,12 @@ void getCurrentDirectory(Span<char> output)
 
 bool getSaveFilename(Span<char> out, const char* filter, const char* default_extension)
 {
-	WCharStr<MAX_PATH_LENGTH> wtmp("");
-	WCHAR wfilter[MAX_PATH_LENGTH];
+	WCharStr<LUMIX_MAX_PATH> wtmp("");
+	WCHAR wfilter[LUMIX_MAX_PATH];
 	
 	const char* c = filter;
 	WCHAR* cout = wfilter;
-	while ((*c || *(c + 1)) && (c - filter) < MAX_PATH_LENGTH - 2) {
+	while ((*c || *(c + 1)) && (c - filter) < LUMIX_MAX_PATH - 2) {
 		*cout = *c;
 		++cout;
 		++c;
@@ -877,7 +876,7 @@ bool getSaveFilename(Span<char> out, const char* filter, const char* default_ext
 	++cout;
 	*cout = 0;
 
-	WCharStr<MAX_PATH_LENGTH> wdefault_extension(default_extension ? default_extension : "");
+	WCharStr<LUMIX_MAX_PATH> wdefault_extension(default_extension ? default_extension : "");
 	OPENFILENAME ofn;
 	ZeroMemory(&ofn, sizeof(ofn));
 	ofn.lStructSize = sizeof(ofn);
@@ -895,7 +894,7 @@ bool getSaveFilename(Span<char> out, const char* filter, const char* default_ext
 
 	bool res = GetSaveFileName(&ofn) != FALSE;
 
-	char tmp[MAX_PATH_LENGTH];
+	char tmp[LUMIX_MAX_PATH];
 	fromWChar(Span(tmp), wtmp);
 	if (res) Path::normalize(tmp, out);
 	return res;
@@ -922,12 +921,12 @@ bool getOpenFilename(Span<char> out, const char* filter, const char* starting_fi
 	{
 		out[0] = '\0';
 	}
-	WCHAR wout[MAX_PATH_LENGTH] = {};
-	WCHAR wfilter[MAX_PATH_LENGTH];
+	WCHAR wout[LUMIX_MAX_PATH] = {};
+	WCHAR wfilter[LUMIX_MAX_PATH];
 	
 	const char* c = filter;
 	WCHAR* cout = wfilter;
-	while ((*c || *(c + 1)) && (c - filter) < MAX_PATH_LENGTH - 2) {
+	while ((*c || *(c + 1)) && (c - filter) < LUMIX_MAX_PATH - 2) {
 		*cout = *c;
 		++cout;
 		++c;
@@ -947,7 +946,7 @@ bool getOpenFilename(Span<char> out, const char* filter, const char* starting_fi
 
 	const bool res = GetOpenFileName(&ofn) != FALSE;
 	if (res) {
-		char tmp[MAX_PATH_LENGTH];
+		char tmp[LUMIX_MAX_PATH];
 		fromWChar(Span(tmp), wout);
 		Path::normalize(tmp, out);
 	}
@@ -1046,7 +1045,7 @@ void copyToClipboard(const char* text)
 
 ExecuteOpenResult shellExecuteOpen(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	const uintptr_t res = (uintptr_t)ShellExecute(NULL, NULL, wpath, NULL, NULL, SW_SHOW);
 	if (res > 32) return ExecuteOpenResult::SUCCESS;
 	if (res == SE_ERR_NOASSOC) return ExecuteOpenResult::NO_ASSOCIATION;
@@ -1056,7 +1055,7 @@ ExecuteOpenResult shellExecuteOpen(const char* path)
 
 ExecuteOpenResult openExplorer(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	const uintptr_t res = (uintptr_t)ShellExecute(NULL, L"explore", wpath, NULL, NULL, SW_SHOWNORMAL);
 	if (res > 32) return ExecuteOpenResult::SUCCESS;
 	if (res == SE_ERR_NOASSOC) return ExecuteOpenResult::NO_ASSOCIATION;
@@ -1066,15 +1065,15 @@ ExecuteOpenResult openExplorer(const char* path)
 
 bool deleteFile(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	return DeleteFile(wpath) != FALSE;
 }
 
 
 bool moveFile(const char* from, const char* to)
 {
-	const WCharStr<MAX_PATH_LENGTH> wfrom(from);
-	const WCharStr<MAX_PATH_LENGTH> wto(to);
+	const WCharStr<LUMIX_MAX_PATH> wfrom(from);
+	const WCharStr<LUMIX_MAX_PATH> wto(to);
 	return MoveFileEx(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != FALSE;
 }
 
@@ -1082,7 +1081,7 @@ bool moveFile(const char* from, const char* to)
 size_t getFileSize(const char* path)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fad;
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	if (!GetFileAttributesEx(wpath, GetFileExInfoStandard, &fad)) return -1;
 	LARGE_INTEGER size;
 	size.HighPart = fad.nFileSizeHigh;
@@ -1093,7 +1092,7 @@ size_t getFileSize(const char* path)
 
 bool fileExists(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	DWORD dwAttrib = GetFileAttributes(wpath);
 	return (dwAttrib != INVALID_FILE_ATTRIBUTES && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
 }
@@ -1101,7 +1100,7 @@ bool fileExists(const char* path)
 
 bool dirExists(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	DWORD dwAttrib = GetFileAttributes(wpath);
 	return (dwAttrib != INVALID_FILE_ATTRIBUTES && (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
 }
@@ -1109,7 +1108,7 @@ bool dirExists(const char* path)
 
 u64 getLastModified(const char* path)
 {
-	const WCharStr<MAX_PATH_LENGTH> wpath(path);
+	const WCharStr<LUMIX_MAX_PATH> wpath(path);
 	FILETIME ft;
 	HANDLE handle = CreateFile(wpath, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (handle == INVALID_HANDLE_VALUE) return 0;
@@ -1139,9 +1138,9 @@ bool makePath(const char* path)
 	}
 	*out = '\0';
 
-	const WCharStr<MAX_PATH_LENGTH> wpath(tmp);
+	const WCharStr<LUMIX_MAX_PATH> wpath(tmp);
 	int error_code = SHCreateDirectoryEx(NULL, wpath, NULL);
-	return error_code == ERROR_SUCCESS;
+	return error_code == ERROR_SUCCESS || error_code == ERROR_ALREADY_EXISTS;
 }
 
 

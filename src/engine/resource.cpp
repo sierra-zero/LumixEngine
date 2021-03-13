@@ -4,6 +4,7 @@
 #include "engine/lumix.h"
 #include "engine/path.h"
 #include "engine/resource_manager.h"
+#include "engine/string.h"
 
 
 namespace Lumix
@@ -102,6 +103,7 @@ void Resource::checkState()
 
 void Resource::fileLoaded(u64 size, const u8* mem, bool success)
 {
+	ASSERT(m_async_op.isValid());
 	m_async_op = FileSystem::AsyncHandle::invalid();
 	if (m_desired_state != State::READY) return;
 	
@@ -110,7 +112,7 @@ void Resource::fileLoaded(u64 size, const u8* mem, bool success)
 
 	if (!success)
 	{
-		logError("Core") << "Could not open " << getPath().c_str();
+		logError("Could not open ", getPath().c_str());
 		ASSERT(m_empty_dep_count > 0);
 		--m_empty_dep_count;
 		++m_failed_dep_count;
@@ -174,7 +176,7 @@ void Resource::doLoad()
 	cb.bind<&Resource::fileLoaded>(this);
 
 	const u32 hash = m_path.getHash();
-	const StaticString<MAX_PATH_LENGTH> res_path(".lumix/assets/", hash, ".res");
+	const StaticString<LUMIX_MAX_PATH> res_path(".lumix/assets/", hash, ".res");
 
 	m_async_op = fs.getContent(Path(res_path), cb);
 }
@@ -212,6 +214,15 @@ void Resource::removeDependency(Resource& dependent_resource)
 	}
 
 	checkState();
+}
+
+u32 Resource::decRefCount() {
+	ASSERT(m_ref_count > 0);
+	--m_ref_count;
+	if (m_ref_count == 0 && m_resource_manager.m_is_unload_enabled) {
+		doUnload();
+	}
+	return m_ref_count;
 }
 
 

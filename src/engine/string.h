@@ -26,17 +26,18 @@ LUMIX_ENGINE_API bool toCString(u32 value, Span<char> output);
 LUMIX_ENGINE_API bool toCString(float value, Span<char> output, int after_point);
 LUMIX_ENGINE_API bool toCString(double value, Span<char> output, int after_point);
 LUMIX_ENGINE_API const char* reverseFind(const char* begin_haystack, const char* end_haystack, char c);
-LUMIX_ENGINE_API const char* fromCStringOctal(Span<const char> input, Ref<u32> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<i32> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<u64> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<i64> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<u32> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<u16> value);
-LUMIX_ENGINE_API const char* fromCString(Span<const char> input, Ref<bool> value);
-inline const char* fromCString(Span<const char> input, Ref<EntityPtr> value) { return fromCString(input, Ref(value->index)); };
+LUMIX_ENGINE_API const char* fromCStringOctal(Span<const char> input, u32& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, i32& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, u64& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, i64& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, u32& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, u16& value);
+LUMIX_ENGINE_API const char* fromCString(Span<const char> input, bool& value);
+inline const char* fromCString(Span<const char> input, EntityPtr& value) { return fromCString(input, value.index); };
 LUMIX_ENGINE_API bool copyString(Span<char> output, const char* source);
 LUMIX_ENGINE_API bool copyString(Span<char> output, Span<const char> source);
 LUMIX_ENGINE_API bool copyNString(Span<char> output, const char* source, int N);
+LUMIX_ENGINE_API bool catString(Span<char> output, Span<const char> source);
 LUMIX_ENGINE_API bool catString(Span<char> output, const char* source);
 LUMIX_ENGINE_API bool catNString(Span<char> output, const char* source, int N);
 LUMIX_ENGINE_API bool makeLowercase(Span<char> output, const char* source);
@@ -50,25 +51,9 @@ LUMIX_ENGINE_API int compareStringN(const char* lhs, const char* rhs, int length
 LUMIX_ENGINE_API int compareIStringN(const char* lhs, const char* rhs, int length);
 LUMIX_ENGINE_API const char* findSubstring(const char* str, const char* substr);
 LUMIX_ENGINE_API bool endsWith(const char* str, const char* substr);
-
-
-inline bool isLetter(char c)
-{
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
-
-
-inline bool isNumeric(char c)
-{
-	return c >= '0' && c <= '9';
-}
-
-
-inline bool isUpperCase(char c)
-{
-	return c >= 'A' && c <= 'Z';
-}
-
+LUMIX_ENGINE_API bool isLetter(char c);
+LUMIX_ENGINE_API bool isNumeric(char c);
+LUMIX_ENGINE_API bool isUpperCase(char c);
 
 template <int SIZE> bool copyString(char(&destination)[SIZE], const char* source)
 {
@@ -161,9 +146,7 @@ template <int SIZE> struct StaticString
 };
 
 
-struct LUMIX_ENGINE_API String
-{
-public:
+struct LUMIX_ENGINE_API String {
 	explicit String(IAllocator& allocator);
 	String(const String& rhs, u32 start, u32 length);
 	String(Span<const char> rhs, IAllocator& allocator);

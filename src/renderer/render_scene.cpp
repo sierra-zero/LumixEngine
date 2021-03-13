@@ -17,6 +17,7 @@
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
 #include "engine/universe.h"
+#include "imgui/IconsFontAwesome5.h"
 #include "renderer/culling_system.h"
 #include "renderer/font.h"
 #include "renderer/material.h"
@@ -35,33 +36,24 @@ namespace Lumix
 
 enum class RenderSceneVersion : int
 {
+	DECAL_UV_SCALE,
+	CURVE_DECALS,
 	LATEST
 };
 
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType DECAL_TYPE = Reflection::getComponentType("decal");
-static const ComponentType POINT_LIGHT_TYPE = Reflection::getComponentType("point_light");
-static const ComponentType PARTICLE_EMITTER_TYPE = Reflection::getComponentType("particle_emitter");
-static const ComponentType ENVIRONMENT_TYPE = Reflection::getComponentType("environment");
-static const ComponentType CAMERA_TYPE = Reflection::getComponentType("camera");
-static const ComponentType TERRAIN_TYPE = Reflection::getComponentType("terrain");
-static const ComponentType BONE_ATTACHMENT_TYPE = Reflection::getComponentType("bone_attachment");
-static const ComponentType ENVIRONMENT_PROBE_TYPE = Reflection::getComponentType("environment_probe");
-static const ComponentType REFLECTION_PROBE_TYPE = Reflection::getComponentType("reflection_probe");
-static const ComponentType TEXT_MESH_TYPE = Reflection::getComponentType("text_mesh");
-
-
-struct Decal
-{
-	Material* material = nullptr;
-	Transform transform;
-	float radius;
-	EntityRef entity;
-	EntityPtr prev_decal = INVALID_ENTITY;
-	EntityPtr next_decal = INVALID_ENTITY;
-	Vec3 half_extents;
-};
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType DECAL_TYPE = reflection::getComponentType("decal");
+static const ComponentType CURVE_DECAL_TYPE = reflection::getComponentType("curve_decal");
+static const ComponentType POINT_LIGHT_TYPE = reflection::getComponentType("point_light");
+static const ComponentType PARTICLE_EMITTER_TYPE = reflection::getComponentType("particle_emitter");
+static const ComponentType ENVIRONMENT_TYPE = reflection::getComponentType("environment");
+static const ComponentType CAMERA_TYPE = reflection::getComponentType("camera");
+static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
+static const ComponentType BONE_ATTACHMENT_TYPE = reflection::getComponentType("bone_attachment");
+static const ComponentType ENVIRONMENT_PROBE_TYPE = reflection::getComponentType("environment_probe");
+static const ComponentType REFLECTION_PROBE_TYPE = reflection::getComponentType("reflection_probe");
+static const ComponentType FUR_TYPE = reflection::getComponentType("fur");
 
 
 struct BoneAttachment
@@ -73,82 +65,33 @@ struct BoneAttachment
 };
 
 
-struct TextMesh
-{
-	enum Flags : u32
-	{
-		CAMERA_ORIENTED = 1 << 0
-	};
-	
-	TextMesh(IAllocator& allocator) : text("", allocator) {}
-	~TextMesh() { setFontResource(nullptr); }
-
-	void setFontResource(FontResource* res)
-	{
-		if (m_font_resource)
-		{
-			if (m_font)
-			{
-				m_font_resource->removeRef(*m_font);
-				m_font = nullptr;
-			}
-			m_font_resource->getObserverCb().unbind<&TextMesh::onFontLoaded>(this);
-			m_font_resource->getResourceManager().unload(*m_font_resource);
-		}
-		m_font_resource = res;
-		if (res) res->onLoaded<&TextMesh::onFontLoaded>(this); 
-	}
-
-	void onFontLoaded(Resource::State, Resource::State new_state, Resource&)
-	{
-		if (new_state != Resource::State::READY)
-		{
-			m_font = nullptr;
-		}
-		else
-		{
-			m_font = m_font_resource->addRef(m_font_size);
-		}
-	}
-
-	void setFontSize(int value)
-	{
-		m_font_size = value;
-		if (m_font_resource && m_font_resource->isReady())
-		{
-			if(m_font) m_font_resource->removeRef(*m_font);
-			m_font = m_font_resource->addRef(m_font_size);
-		}
-	}
-
-	FontResource* getFontResource() const { return m_font_resource; }
-	Font* getFont() const { return m_font; }
-	int getFontSize() const { return m_font_size; }
-
-	String text;
-	u32 color = 0xff000000;
-	FlagSet<Flags, u32> m_flags;
-
-private:
-	int m_font_size = 13;
-	Font* m_font = nullptr;
-	FontResource* m_font_resource = nullptr;
-
-};
-
-
-static RenderableTypes getRenderableType(const Model& model)
+static RenderableTypes getRenderableType(const Model& model, bool custom_material)
 {
 	ASSERT(model.isReady());
+	if (custom_material) return RenderableTypes::MESH_MATERIAL_OVERRIDE;
 	if (model.isSkinned()) return RenderableTypes::SKINNED;
 	if (model.getMeshCount() > 1) return RenderableTypes::MESH_GROUP;
 	return RenderableTypes::MESH;
 }
 
+struct ReflectionProbe::LoadJob {
+	LoadJob(struct RenderSceneImpl& scene, EntityRef probe, IAllocator& allocator)
+		: m_scene(scene)
+		, m_allocator(allocator)
+		, m_entity(probe)
+	{}
 
-struct RenderSceneImpl final : RenderScene
-{
-public:
+	~LoadJob();
+
+	void callback(u64 size, const u8* data, bool success);
+
+	IAllocator& m_allocator;
+	RenderSceneImpl& m_scene;
+	EntityRef m_entity;
+	FileSystem::AsyncHandle m_handle = FileSystem::AsyncHandle::invalid();
+};
+
+struct RenderSceneImpl final : RenderScene {
 	RenderSceneImpl(Renderer& renderer,
 		Engine& engine,
 		Universe& universe,
@@ -156,9 +99,10 @@ public:
 
 	~RenderSceneImpl()
 	{
+		m_renderer.destroy(m_reflection_probes_texture);
 		m_universe.entityTransformed().unbind<&RenderSceneImpl::onEntityMoved>(this);
 		m_universe.entityDestroyed().unbind<&RenderSceneImpl::onEntityDestroyed>(this);
-		CullingSystem::destroy(*m_culling_system);
+		m_culling_system.reset();
 	}
 
 
@@ -170,7 +114,7 @@ public:
 			auto map_iter = m_material_decal_map.find(&material);
 			EntityPtr e = map_iter.value();
 			while(e.isValid()) {
-				const float radius = m_decals[(EntityRef)e].half_extents.length();
+				const float radius = length(m_decals[(EntityRef)e].half_extents);
 				const DVec3 pos = m_universe.getPosition((EntityRef)e);
 				m_culling_system->add((EntityRef)e, (u8)RenderableTypes::DECAL, pos, radius);
 				e = m_decals[(EntityRef)e].next_decal;
@@ -184,6 +128,33 @@ public:
 			while(e.isValid()) {
 				m_culling_system->remove((EntityRef)e);
 				e = m_decals[(EntityRef)e].next_decal;
+			}
+		}
+	}
+
+
+	void curveDecalMaterialStateChanged(Resource::State old_state, Resource::State new_state, Resource& resource)
+	{
+		Material& material = static_cast<Material&>(resource);
+		
+		if (new_state == Resource::State::READY) {
+			auto map_iter = m_material_curve_decal_map.find(&material);
+			EntityPtr e = map_iter.value();
+			while(e.isValid()) {
+				const float radius = length(m_curve_decals[(EntityRef)e].half_extents);
+				const DVec3 pos = m_universe.getPosition((EntityRef)e);
+				m_culling_system->add((EntityRef)e, (u8)RenderableTypes::CURVE_DECAL, pos, radius);
+				e = m_curve_decals[(EntityRef)e].next_decal;
+			}
+			return;
+		}
+		
+		if (old_state == Resource::State::READY) {
+			auto map_iter = m_material_curve_decal_map.find(&material);
+			EntityPtr e = map_iter.value();
+			while(e.isValid()) {
+				m_culling_system->remove((EntityRef)e);
+				e = m_curve_decals[(EntityRef)e].next_decal;
 			}
 		}
 	}
@@ -208,16 +179,9 @@ public:
 		auto& rm = m_engine.getResourceManager();
 		auto* material_manager = rm.get(Material::TYPE);
 
-		
-		for (TextMesh* text_mesh : m_text_meshes)
-		{
-			LUMIX_DELETE(m_allocator, text_mesh);
-		}
-		m_text_meshes.clear();
-
 		for (Decal& decal : m_decals)
 		{
-			if (decal.material) material_manager->unload(*decal.material);
+			if (decal.material) decal.material->decRefCount();
 		}
 		m_decals.clear();
 
@@ -239,7 +203,9 @@ public:
 		{
 			if (i.flags.isSet(ModelInstance::VALID) && i.model)
 			{
-				i.model->getResourceManager().unload(*i.model);
+				i.model->decRefCount();
+				if (i.custom_material) i.custom_material->decRefCount();
+				i.custom_material = nullptr;
 				LUMIX_DELETE(m_allocator, i.pose);
 				i.pose = nullptr;
 			}
@@ -259,8 +225,8 @@ public:
 
 		m_culling_system->clear();
 
-		for (auto& probe : m_reflection_probes) {
-			if (probe.texture) probe.texture->getResourceManager().unload(*probe.texture);
+		for (const ReflectionProbe& probe : m_reflection_probes) {
+			LUMIX_DELETE(m_allocator, probe.load_job);
 		}
 
 		m_reflection_probes.clear();
@@ -302,24 +268,18 @@ public:
 				+ view.rot * Vec3(0, 1, 0) * ny * camera.ortho_size;
 		}
 
-		Matrix inv_projection = projection_matrix;
-		inv_projection.inverse();
+		const Matrix inv_projection = projection_matrix.inverted();
 
 		Vec4 p0 = inv_projection * Vec4(nx, ny, -1, 1);
 		Vec4 p1 = inv_projection * Vec4(nx, ny, 1, 1);
 		p0 *= 1 / p0.w;
 		p1 *= 1 / p1.w;
-		dir = (p1 - p0).xyz();
-		dir.normalize();
+		dir = normalize((p1 - p0).xyz());
 		dir = view.rot * dir;
 	}
 
-	
-	EntityPtr getActiveCamera() const override
-	{
-		return m_active_camera;
-	}
-
+	void setActiveCamera(EntityRef camera) override { m_active_camera = camera; }
+	EntityPtr getActiveCamera() const override { return m_active_camera; }
 
 	Viewport getCameraViewport(EntityRef entity) const override
 	{
@@ -476,7 +436,7 @@ public:
 		inv_parent_transform = inv_parent_transform.inverted();
 		const Transform child_transform = m_universe.getTransform(attachment.entity);
 		const Transform res = inv_parent_transform * child_transform;
-		attachment.relative_transform = {res.pos.toFloat(), res.rot};
+		attachment.relative_transform = {Vec3(res.pos), res.rot};
 		unlockPose(model_instance, false);
 	}
 
@@ -580,151 +540,6 @@ public:
 		}
 	}
 
-	void setTextMeshText(EntityRef entity, const char* text) override
-	{
-		m_text_meshes.get(entity)->text = text;
-	}
-
-
-	const char* getTextMeshText(EntityRef entity) override
-	{
-		return m_text_meshes.get(entity)->text.c_str();
-	}
-
-
-	bool isTextMeshCameraOriented(EntityRef entity) override
-	{
-		TextMesh& text = *m_text_meshes.get(entity);
-		return text.m_flags.isSet(TextMesh::CAMERA_ORIENTED);
-	}
-
-
-	void setTextMeshCameraOriented(EntityRef entity, bool is_oriented) override
-	{
-		TextMesh& text = *m_text_meshes.get(entity);
-		text.m_flags.set(TextMesh::CAMERA_ORIENTED, is_oriented);
-	}
-
-
-	void setTextMeshFontSize(EntityRef entity, int value) override
-	{
-		TextMesh& text = *m_text_meshes.get(entity);
-		text.setFontSize(value);
-	}
-
-
-	int getTextMeshFontSize(EntityRef entity) override
-	{
-		return m_text_meshes.get(entity)->getFontSize();
-	}
-
-
-	static Vec4 ABGRu32ToRGBAVec4(u32 value)
-	{
-		float inv = 1 / 255.0f;
-		return {
-			((value >> 0) & 0xFF) * inv,
-			((value >> 8) & 0xFF) * inv,
-			((value >> 16) & 0xFF) * inv,
-			((value >> 24) & 0xFF) * inv,
-		};
-	}
-
-
-	static u32 RGBAVec4ToABGRu32(const Vec4& value)
-	{
-		u8 r = u8(value.x * 255 + 0.5f);
-		u8 g = u8(value.y * 255 + 0.5f);
-		u8 b = u8(value.z * 255 + 0.5f);
-		u8 a = u8(value.w * 255 + 0.5f);
-		return (a << 24) + (b << 16) + (g << 8) + r;
-	}
-
-
-	Vec4 getTextMeshColorRGBA(EntityRef entity) override
-	{
-		return ABGRu32ToRGBAVec4(m_text_meshes.get(entity)->color);
-	}
-
-
-	void setTextMeshColorRGBA(EntityRef entity, const Vec4& color) override
-	{
-		m_text_meshes.get(entity)->color = RGBAVec4ToABGRu32(color);
-	}
-
-
-	Path getTextMeshFontPath(EntityRef entity) override
-	{
-		TextMesh& text = *m_text_meshes.get(entity);
-		return text.getFontResource() == nullptr ? Path() : text.getFontResource()->getPath();
-	}
-
-	u32 getTextMeshesVerticesCount() const override {
-		u32 count = 0;
-		for (int j = 0, nj = m_text_meshes.size(); j < nj; ++j) {
-			const TextMesh& text = *m_text_meshes.at(j);
-			count += 6 * text.text.length();
-		}
-		return count;
-	}
-
-	void getTextMeshesVertices(TextMeshVertex* vertices, const DVec3& cam_pos, const Quat& cam_rot) override
-	{
-		const Vec3 cam_right = cam_rot * Vec3(1, 0, 0);
-		const Vec3 cam_up = cam_rot * Vec3(0, -1, 0);
-		u32 idx = 0;
-		for (int j = 0, nj = m_text_meshes.size(); j < nj; ++j) {
-			const TextMesh& text = *m_text_meshes.at(j);
-			const Font* font = text.getFont();
-			if (!font) continue;
-
-			const EntityRef entity = m_text_meshes.getKey(j);
-			const char* str = text.text.c_str();
-			Vec3 base = (m_universe.getPosition(entity) - cam_pos).toFloat();
-			const Quat rot = m_universe.getRotation(entity);
-			const float scale = m_universe.getScale(entity);
-			Vec3 right = rot.rotate(Vec3(1, 0, 0)) * scale;
-			Vec3 up = rot.rotate(Vec3(0, -1, 0)) * scale;
-			if (text.m_flags.isSet(TextMesh::CAMERA_ORIENTED)) {
-				right = cam_right * scale;
-				up = cam_up * scale;
-			}
-			u32 color = text.color;
-			const Vec2 text_size = measureTextA(*font, str, nullptr);
-			base += right * text_size.x * -0.5f;
-			base += up * text_size.y * -0.5f;
-			for (int i = 0, n = text.text.length(); i < n; ++i) {
-				const Glyph* glyph = findGlyph(*font, str[i]);
-				if (!glyph) continue;
-
-				const Vec3 x0y0 = base + right * float(glyph->x0) + up * float(glyph->y0);
-				const Vec3 x1y0 = base + right * float(glyph->x1) + up * float(glyph->y0);
-				const Vec3 x1y1 = base + right * float(glyph->x1) + up * float(glyph->y1);
-				const Vec3 x0y1 = base + right * float(glyph->x0) + up * float(glyph->y1);
-
-				vertices[idx + 0] = { x0y0, color, { glyph->u0, glyph->v0 } };
-				vertices[idx + 1] = { x1y0, color, { glyph->u1, glyph->v0 } };
-				vertices[idx + 2] = { x1y1, color, { glyph->u1, glyph->v1 } };
-
-				vertices[idx + 3] = { x0y0, color, { glyph->u0, glyph->v0 } };
-				vertices[idx + 4] = { x1y1, color, { glyph->u1, glyph->v1 } };
-				vertices[idx + 5] = { x0y1, color, { glyph->u0, glyph->v1 } };
-				idx += 6;
-
-				base += right * float(glyph->advance_x);
-			}
-		}
-	}
-
-
-	void setTextMeshFontPath(EntityRef entity, const Path& path) override
-	{
-		TextMesh& text = *m_text_meshes.get(entity);
-		ResourceManagerHub& manager = m_renderer.getEngine().getResourceManager();
-		FontResource* res = path.isValid() ? manager.load<FontResource>(path) : nullptr;
-		text.setFontResource(res);
-	}
-
 
 	int getVersion() const override { return (int)RenderSceneVersion::LATEST; }
 
@@ -773,8 +588,8 @@ public:
 			serializer.write(r.flags.base);
 			if(r.flags.isSet(ModelInstance::VALID)) {
 				serializer.writeString(r.model ? r.model->getPath().c_str() : "");
+				serializer.writeString(r.custom_material ? r.custom_material->getPath().c_str() : "");
 			}
-			
 		}
 	}
 
@@ -788,47 +603,30 @@ public:
 		}
 	}
 
-	void serializeTextMeshes(OutputMemoryStream& serializer)
-	{
-		serializer.write(m_text_meshes.size());
-		for (int i = 0, n = m_text_meshes.size(); i < n; ++i)
-		{
-			TextMesh& text = *m_text_meshes.at(i);
-			EntityRef e = m_text_meshes.getKey(i);
-			serializer.write(e);
-			serializer.writeString(text.getFontResource() ? text.getFontResource()->getPath().c_str() : "");
-			serializer.write(text.color);
-			serializer.write(text.getFontSize());
-			serializer.write(text.text);
+	void serializeFurs(OutputMemoryStream& serializer) {
+		serializer.write(m_furs.size());
+		for (auto iter = m_furs.begin(); iter.isValid(); ++iter) {
+			serializer.write(iter.key());
+			serializer.write(iter.value());
 		}
 	}
 
-	void deserializeTextMeshes(InputMemoryStream& serializer, const EntityMap& entity_map)
-	{
+	void deserializeFurs(InputMemoryStream& serializer, const EntityMap& entity_map) {
 		u32 count;
 		serializer.read(count);
-		ResourceManagerHub& manager = m_renderer.getEngine().getResourceManager();
-		
+		m_furs.reserve(count + m_furs.size());
 		for (u32 i = 0; i < count; ++i) {
 			EntityRef e;
 			serializer.read(e);
 			e = entity_map.get(e);
-			TextMesh& text = *LUMIX_NEW(m_allocator, TextMesh)(m_allocator);
-			m_text_meshes.insert(e, &text);
-			const char* tmp = serializer.readString();
-			serializer.read(text.color);
-			int font_size;
-			serializer.read(font_size);
-			text.setFontSize(font_size);
-			serializer.read(text.text);
-			FontResource* res = tmp[0] ? manager.load<FontResource>(Path(tmp)) : nullptr;
-			text.setFontResource(res);
-			m_universe.onComponentCreated(e, TEXT_MESH_TYPE, this);
+			FurComponent fur;
+			serializer.read(fur);
+			m_furs.insert(e, fur);
+			m_universe.onComponentCreated(e, FUR_TYPE, this);
 		}
 	}
 
-
-	void deserializeDecals(InputMemoryStream& serializer, const EntityMap& entity_map)
+	void deserializeDecals(InputMemoryStream& serializer, const EntityMap& entity_map, i32 version)
 	{
 		u32 count;
 		serializer.read(count);
@@ -838,11 +636,39 @@ public:
 			serializer.read(decal.entity);
 			decal.entity = entity_map.get(decal.entity);
 			serializer.read(decal.half_extents);
+			decal.uv_scale = Vec2(1);
+			if (version > (i32)RenderSceneVersion::DECAL_UV_SCALE) {
+				serializer.read(decal.uv_scale);
+			}
 			const char* tmp = serializer.readString();
 			updateDecalInfo(decal);
 			m_decals.insert(decal.entity, decal);
 			setDecalMaterialPath(decal.entity, Path(tmp));
 			m_universe.onComponentCreated(decal.entity, DECAL_TYPE, this);
+		}
+	}
+	
+	void deserializeCurveDecals(InputMemoryStream& serializer, const EntityMap& entity_map, i32 version)
+	{
+		if (version <= (i32)RenderSceneVersion::CURVE_DECALS) return;
+		
+		u32 count;
+		serializer.read(count);
+		m_curve_decals.reserve(count + m_decals.size());
+		for (u32 i = 0; i < count; ++i) {
+			CurveDecal decal;
+			serializer.read(decal.entity);
+			decal.entity = entity_map.get(decal.entity);
+			decal.uv_scale = Vec2(1);
+			serializer.read(decal.uv_scale);
+			serializer.read(decal.half_extents.y);
+			serializer.read(decal.bezier_p0);
+			serializer.read(decal.bezier_p2);
+			const char* tmp = serializer.readString();
+			updateDecalInfo(decal);
+			m_curve_decals.insert(decal.entity, decal);
+			setCurveDecalMaterialPath(decal.entity, Path(tmp));
+			m_universe.onComponentCreated(decal.entity, CURVE_DECAL_TYPE, this);
 		}
 	}
 
@@ -854,6 +680,21 @@ public:
 		{
 			serializer.write(decal.entity);
 			serializer.write(decal.half_extents);
+			serializer.write(decal.uv_scale);
+			serializer.writeString(decal.material ? decal.material->getPath().c_str() : "");
+		}
+	}
+
+	void serializeCurveDecals(OutputMemoryStream& serializer)
+	{
+		serializer.write(m_curve_decals.size());
+		for (auto& decal : m_curve_decals)
+		{
+			serializer.write(decal.entity);
+			serializer.write(decal.uv_scale);
+			serializer.write(decal.half_extents.y);
+			serializer.write(decal.bezier_p0);
+			serializer.write(decal.bezier_p2);
 			serializer.writeString(decal.material ? decal.material->getPath().c_str() : "");
 		}
 	}
@@ -892,23 +733,48 @@ public:
 		serializer.read(count);
 		m_reflection_probes.reserve(count + m_reflection_probes.size());
 		ResourceManagerHub& manager = m_engine.getResourceManager();
-		StaticString<MAX_PATH_LENGTH> probe_dir("universes/", m_universe.getName(), "/probes/");
 		for (u32 i = 0; i < count; ++i) {
 			EntityRef entity;
 			serializer.read(entity);
 			entity = entity_map.get(entity);
 			ReflectionProbe& probe = m_reflection_probes.insert(entity);
-			// TODO probes are stored in per-universe directory, that won't work with additive loading
 			serializer.read(probe.guid);
 			serializer.read(probe.flags.base);
 			serializer.read(probe.size);
 			serializer.read(probe.half_extents);
-			ASSERT(probe.texture == nullptr);
-			StaticString<MAX_PATH_LENGTH> path_str(probe_dir, probe.guid, ".dds");
-			probe.texture = manager.load<Texture>(Path(path_str));
+			load(probe, entity);
 
 			m_universe.onComponentCreated(entity, REFLECTION_PROBE_TYPE, this);
 		}
+	}
+
+	void load(ReflectionProbe& probe, EntityRef entity) {
+		ASSERT(!probe.load_job);
+
+		if (probe.texture_id == 0xffFFffFF) {
+			u32 mask = 0;
+			for (auto& p : m_reflection_probes) {
+				if (p.texture_id != 0xffFFffFF) mask |= 1 << p.texture_id;
+			}
+
+			for (u32 i = 0; i < 32; ++i) {
+				if ((mask & (1 << i)) == 0) {
+					probe.texture_id = i;
+					break;
+				}
+			}
+		}
+
+		StaticString<LUMIX_MAX_PATH> path_str("universes/probes/", probe.guid, ".dds");
+		if (probe.texture_id == 0xffFFffFF) {
+			logError("There's not enough space for ", path_str);
+			return;
+		}
+		
+		probe.load_job = LUMIX_NEW(m_allocator, ReflectionProbe::LoadJob)(*this, entity, m_allocator);
+		FileSystem::ContentCallback cb;
+		cb.bind<&ReflectionProbe::LoadJob::callback>(probe.load_job);
+		probe.load_job->m_handle = m_engine.getFileSystem().getContent(Path(path_str), cb);
 	}
 
 	void deserializeEnvironmentProbes(InputMemoryStream& serializer, const EntityMap& entity_map)
@@ -917,7 +783,7 @@ public:
 		serializer.read(count);
 		m_environment_probes.reserve(count + m_environment_probes.size());
 		ResourceManagerHub& manager = m_engine.getResourceManager();
-		StaticString<MAX_PATH_LENGTH> probe_dir("universes/", m_universe.getName(), "/probes/");
+		StaticString<LUMIX_MAX_PATH> probe_dir("universes/probes/");
 		for (u32 i = 0; i < count; ++i) {
 			EntityRef entity;
 			serializer.read(entity);
@@ -941,6 +807,7 @@ public:
 			serializer.read(bone_attachment.entity);
 			bone_attachment.entity = entity_map.get(bone_attachment.entity);
 			serializer.read(bone_attachment.parent_entity);
+			bone_attachment.parent_entity = entity_map.get(bone_attachment.parent_entity);
 			serializer.read(bone_attachment.relative_transform);
 			m_bone_attachments.insert(bone_attachment.entity, bone_attachment);
 			m_universe.onComponentCreated(bone_attachment.entity, BONE_ATTACHMENT_TYPE, this);
@@ -988,7 +855,8 @@ public:
 		serializeEnvironmentProbes(serializer);
 		serializeReflectionProbes(serializer);
 		serializeDecals(serializer);
-		serializeTextMeshes(serializer);
+		serializeCurveDecals(serializer);
+		serializeFurs(serializer);
 	}
 
 
@@ -1037,12 +905,15 @@ public:
 				r.meshes = nullptr;
 				r.mesh_count = 0;
 
-				char path[MAX_PATH_LENGTH];
-				copyString(path, serializer.readString());
-
+				const char* path = serializer.readString();
 				if (path[0] != 0) {
 					Model* model = m_engine.getResourceManager().load<Model>(Path(path));
 					setModel(e, model);
+				}
+
+				const char* mat_path = serializer.readString();
+				if (mat_path[0] != 0) {
+					setModelInstanceMaterialOverride(e, Path(mat_path));
 				}
 
 				m_universe.onComponentCreated(e, MODEL_INSTANCE_TYPE, this);
@@ -1077,7 +948,7 @@ public:
 		EntityPtr tmp;
 		serializer.read(tmp);
 		if (!m_active_global_light_entity.isValid()) {
-			m_active_global_light_entity = tmp;
+			m_active_global_light_entity = entity_map.get(tmp);
 		}
 	}
 
@@ -1097,7 +968,7 @@ public:
 	}
 
 
-	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map) override
+	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map, i32 version) override
 	{
 		deserializeCameras(serializer, entity_map);
 		deserializeModelInstances(serializer, entity_map);
@@ -1107,8 +978,9 @@ public:
 		deserializeBoneAttachments(serializer, entity_map);
 		deserializeEnvironmentProbes(serializer, entity_map);
 		deserializeReflectionProbes(serializer, entity_map);
-		deserializeDecals(serializer, entity_map);
-		deserializeTextMeshes(serializer, entity_map);
+		deserializeDecals(serializer, entity_map, version);
+		deserializeCurveDecals(serializer, entity_map, version);
+		deserializeFurs(serializer, entity_map);
 	}
 
 
@@ -1128,7 +1000,7 @@ public:
 	void destroyReflectionProbe(EntityRef entity)
 	{
 		ReflectionProbe& probe = m_reflection_probes[entity];
-		if (probe.texture) probe.texture->getResourceManager().unload(*probe.texture);
+		LUMIX_DELETE(m_allocator, probe.load_job);
 		m_reflection_probes.erase(entity);
 		m_universe.onComponentDestroyed(entity, REFLECTION_PROBE_TYPE, this);
 	}
@@ -1148,6 +1020,8 @@ public:
 		model_instance.pose = nullptr;
 		model_instance.flags.clear();
 		model_instance.flags.set(ModelInstance::VALID, false);
+		if (model_instance.custom_material) model_instance.custom_material->decRefCount();
+		model_instance.custom_material = nullptr;
 		m_universe.onComponentDestroyed(entity, MODEL_INSTANCE_TYPE, this);
 	}
 
@@ -1162,6 +1036,10 @@ public:
 		m_environments.erase(entity);
 	}
 
+	void destroyFur(EntityRef entity) {
+		m_furs.erase(entity);
+		m_universe.onComponentDestroyed(entity, FUR_TYPE, this);
+	}
 
 	void destroyDecal(EntityRef entity)
 	{
@@ -1170,21 +1048,18 @@ public:
 		m_universe.onComponentDestroyed(entity, DECAL_TYPE, this);
 	}
 
+	void destroyCurveDecal(EntityRef entity)
+	{
+		m_culling_system->remove(entity);
+		m_curve_decals.erase(entity);
+		m_universe.onComponentDestroyed(entity, CURVE_DECAL_TYPE, this);
+	}
 
 	void destroyPointLight(EntityRef entity)
 	{
 		m_point_lights.erase(entity);
 		m_culling_system->remove(entity);
 		m_universe.onComponentDestroyed(entity, POINT_LIGHT_TYPE, this);
-	}
-
-
-	void destroyTextMesh(EntityRef entity)
-	{
-		TextMesh* text = m_text_meshes[entity];
-		LUMIX_DELETE(m_allocator, text);
-		m_text_meshes.erase(entity);
-		m_universe.onComponentDestroyed(entity, TEXT_MESH_TYPE, this);
 	}
 
 
@@ -1213,11 +1088,9 @@ public:
 	}
 
 
-	void createTextMesh(EntityRef entity)
-	{
-		TextMesh* text = LUMIX_NEW(m_allocator, TextMesh)(m_allocator);
-		m_text_meshes.insert(entity, text);
-		m_universe.onComponentCreated(entity, TEXT_MESH_TYPE, this);
+	void createFur(EntityRef entity) {
+		m_furs.insert(entity, {});
+		m_universe.onComponentCreated(entity, FUR_TYPE, this);
 	}
 
 
@@ -1284,9 +1157,15 @@ public:
 	}
 
 
-	const ModelInstance* getModelInstances() const override
+	Span<const ModelInstance> getModelInstances() const override
 	{
-		return m_model_instances.empty() ? nullptr : &m_model_instances[0];
+		return m_model_instances;
+	}
+
+
+	Span<ModelInstance> getModelInstances() override
+	{
+		return m_model_instances;
 	}
 
 
@@ -1328,11 +1207,17 @@ public:
 				const Transform& tr = m_universe.getTransform(entity);
 				const Model* model = m_model_instances[entity.index].model;
 				ASSERT(model);
-				const float bounding_radius = model->getBoundingRadius();
+				const float bounding_radius = model->getOriginBoundingRadius();
 				m_culling_system->set(entity, tr.pos, bounding_radius * tr.scale);
 			}
 			else if (m_universe.hasComponent(entity, DECAL_TYPE)) {
 				auto iter = m_decals.find(entity);
+				updateDecalInfo(iter.value());
+				const DVec3 position = m_universe.getPosition(entity);
+				m_culling_system->setPosition(entity, position);
+			}
+			else if (m_universe.hasComponent(entity, CURVE_DECAL_TYPE)) {
+				auto iter = m_curve_decals.find(entity);
 				updateDecalInfo(iter.value());
 				const DVec3 position = m_universe.getPosition(entity);
 				m_culling_system->setPosition(entity, position);
@@ -1431,14 +1316,11 @@ public:
 
 	void setTerrainMaterialPath(EntityRef entity, const Path& path) override
 	{
-		if (path.isValid())
-		{
+		if (path.isEmpty()) {
+			m_terrains[entity]->setMaterial(nullptr);
+		} else {
 			Material* material = m_engine.getResourceManager().load<Material>(path);
 			m_terrains[entity]->setMaterial(material);
-		}
-		else
-		{
-			m_terrains[entity]->setMaterial(nullptr);
 		}
 	}
 
@@ -1451,7 +1333,7 @@ public:
 		Decal& decal = m_decals[entity];
 		decal.half_extents = value;
 		if (decal.material && decal.material->isReady()) {
-			m_culling_system->setRadius(entity, value.length());
+			m_culling_system->setRadius(entity, length(value));
 		}
 		updateDecalInfo(decal);
 	}
@@ -1462,34 +1344,114 @@ public:
 		return m_decals[entity].half_extents;
 	}
 
+	Decal& getDecal(EntityRef entity) override {
+		return m_decals[entity];
+	}
+
+	CurveDecal& getCurveDecal(EntityRef entity) override {
+		return m_curve_decals[entity];
+	}
+
+	void setCurveDecalMaterialPath(EntityRef entity, const Path& path) override {
+		CurveDecal& decal = m_curve_decals[entity];
+		if (decal.material) {
+			removeFromMaterialCurveDecalMap(decal.material, entity);
+			decal.material->decRefCount();
+		}
+
+		m_culling_system->remove(entity);
+		if (path.isEmpty()) {
+			decal.material = nullptr;
+		}
+		else {
+			decal.material = m_engine.getResourceManager().load<Material>(path);
+			addToMaterialCurveDecalMap(decal.material, entity);
+
+			if (decal.material->isReady()) {
+				const float radius = length(m_curve_decals[entity].half_extents);
+				const DVec3 pos = m_universe.getPosition(entity);
+				m_culling_system->add(entity, (u8)RenderableTypes::CURVE_DECAL, pos, radius);
+			}
+		}
+	}
+
+	Path getCurveDecalMaterialPath(EntityRef entity) override {
+		CurveDecal& decal = m_curve_decals[entity];
+		return decal.material ? decal.material->getPath() : Path("");
+	}
+	
+	void setCurveDecalHalfExtents(EntityRef entity, float value) override
+	{
+		CurveDecal& decal = m_curve_decals[entity];
+		decal.half_extents.y = value;
+		updateDecalInfo(decal);
+		if (decal.material && decal.material->isReady()) {
+			m_culling_system->setRadius(entity, decal.radius);
+		}
+	}
+
+	void setCurveDecalBezierP0(EntityRef entity, const Vec2& value) override {
+		CurveDecal& decal = m_curve_decals[entity];
+		decal.bezier_p0 = value;
+		updateDecalInfo(decal);
+		if (decal.material && decal.material->isReady()) {
+			m_culling_system->setRadius(entity, decal.radius);
+		}
+	}
+
+	void setCurveDecalUVScale(EntityRef entity, const Vec2& value) override {
+		m_curve_decals[entity].uv_scale = value;
+		updateDecalInfo(m_curve_decals[entity]);
+	}
+
+	Vec2 getCurveDecalBezierP0(EntityRef entity) override {
+		return m_curve_decals[entity].bezier_p0;
+	}
+
+	void setCurveDecalBezierP2(EntityRef entity, const Vec2& value) override {
+		CurveDecal& decal = m_curve_decals[entity];
+		decal.bezier_p2 = value;
+		updateDecalInfo(decal);
+		if (decal.material && decal.material->isReady()) {
+			m_culling_system->setRadius(entity, decal.radius);
+		}
+	}
+
+	Vec2 getCurveDecalBezierP2(EntityRef entity) override {
+		return m_curve_decals[entity].bezier_p2;
+	}
+
+	Vec2 getCurveDecalUVScale(EntityRef entity) override {
+		return m_curve_decals[entity].uv_scale;
+	}
+
+	float getCurveDecalHalfExtents(EntityRef entity) override
+	{
+		return m_curve_decals[entity].half_extents.y;
+	}
 
 	void setDecalMaterialPath(EntityRef entity, const Path& path) override
 	{
 		Decal& decal = m_decals[entity];
 		if (decal.material) {
 			removeFromMaterialDecalMap(decal.material, entity);
-			decal.material->getResourceManager().unload(*decal.material);
+			decal.material->decRefCount();
 		}
 
-		if (path.isValid()) {
+		m_culling_system->remove(entity);
+		if (path.isEmpty()) {
+			decal.material = nullptr;
+		}
+		else {
 			decal.material = m_engine.getResourceManager().load<Material>(path);
 			addToMaterialDecalMap(decal.material, entity);
 
 			if (decal.material->isReady()) {
-				const float radius = m_decals[entity].half_extents.length();
+				const float radius = length(m_decals[entity].half_extents);
 				const DVec3 pos = m_universe.getPosition(entity);
 				m_culling_system->add(entity, (u8)RenderableTypes::DECAL, pos, radius);
 			}
 		}
-		else {
-			decal.material = nullptr;
-		}
-	}
-
-	Material* getDecalMaterial(EntityRef entity) const override
-	{
-		auto iter = m_decals.find(entity);
-		return iter.value().material;
 	}
 
 	Path getDecalMaterialPath(EntityRef entity) override
@@ -1571,9 +1533,9 @@ public:
 			if (!model_instance.model || !model_instance.model->isReady()) return;
 
 			const DVec3 pos = m_universe.getPosition(entity);
-			const float radius = model_instance.model->getBoundingRadius() * m_universe.getScale(entity);
+			const float radius = model_instance.model->getOriginBoundingRadius() * m_universe.getScale(entity);
 			if (!m_culling_system->isAdded(entity)) {
-				const RenderableTypes type = getRenderableType(*model_instance.model);
+				const RenderableTypes type = getRenderableType(*model_instance.model, model_instance.custom_material);
 				m_culling_system->add(entity, (u8)type, pos, radius);
 			}
 		}
@@ -1583,21 +1545,54 @@ public:
 		}
 	}
 
+	void setModelInstanceMaterialOverride(EntityRef entity, const Path& path) override {
+		ModelInstance& mi = m_model_instances[entity.index];
+		if (mi.custom_material) {
+			if (mi.custom_material->getPath() == path) return;
+			
+			mi.custom_material->decRefCount();
+			mi.custom_material = nullptr;
+		}
+
+		if (mi.mesh_count > 0 && mi.meshes[0].material->getPath() == path) return;
+
+		if (!path.isEmpty()) {
+			Material* material = m_engine.getResourceManager().load<Material>(path);
+			mi.custom_material = material;
+		}
+
+		if (!mi.model || !mi.model->isReady()) return;
+
+		if (m_culling_system->isAdded(entity)) {
+			m_culling_system->remove(entity);
+		}
+		const RenderableTypes type = getRenderableType(*mi.model, mi.custom_material);
+		const DVec3 pos = m_universe.getPosition(entity);
+		const float radius = mi.model->getOriginBoundingRadius() * m_universe.getScale(entity);
+		m_culling_system->add(entity, (u8)type, pos, radius);
+	}
+
+	Path getModelInstanceMaterialOverride(EntityRef entity) override {
+		return m_model_instances[entity.index].custom_material ? m_model_instances[entity.index].custom_material->getPath() : Path("");
+	}
 
 	Path getModelInstancePath(EntityRef entity) override
 	{
 		return m_model_instances[entity.index].model ? m_model_instances[entity.index].model->getPath() : Path("");
 	}
 
+	void setModelInstanceLOD(EntityRef entity, u32 lod) override {
+		m_model_instances[entity.index].lod = float(lod);
+	}
 
 	void setModelInstancePath(EntityRef entity, const Path& path) override
 	{
-		if (path.isValid()) {
-			Model* model = m_engine.getResourceManager().load<Model>(path);
-			setModel(entity, model);
+		if (path.isEmpty()) {
+			setModel(entity, nullptr);
 		}
 		else {
-			setModel(entity, nullptr);
+			Model* model = m_engine.getResourceManager().load<Model>(path);
+			setModel(entity, model);
 		}
 	}
 
@@ -1639,41 +1634,9 @@ public:
 	}
 
 
-	static float LUA_getTerrainHeightAt(RenderSceneImpl* render_scene, EntityRef entity, int x, int z)
-	{
-		return render_scene->m_terrains[entity]->getHeight(x, z);
-	}
-
-
 	void setTerrainHeightAt(EntityRef entity, int x, int z, float height)
 	{
 		m_terrains[entity]->setHeight(x, z, height);
-	}
-
-
-	static Pipeline* LUA_createPipeline(Engine* engine, const char* path)
-	{
-		Renderer& renderer = *static_cast<Renderer*>(engine->getPluginManager().getPlugin("renderer"));
-		PipelineResource* pres = engine->getResourceManager().load<PipelineResource>(Path(path));
-		return Pipeline::create(renderer, pres, "", renderer.getEngine().getAllocator());
-	}
-
-
-	static void LUA_destroyPipeline(Pipeline* pipeline)
-	{
-		Pipeline::destroy(pipeline);
-	}
-
-
-	static void LUA_setPipelineScene(Pipeline* pipeline, RenderScene* scene)
-	{
-		pipeline->setUniverse(&scene->getUniverse());
-	}
-
-
-	static RenderScene* LUA_getPipelineScene(Pipeline* pipeline)
-	{
-		return pipeline->getScene();
 	}
 
 
@@ -1688,27 +1651,6 @@ public:
 	{
 		if (!model) return 0;
 		return model->getBoneIndex(crc32(bone)).value();
-	}
-
-
-	static unsigned int LUA_compareTGA(RenderSceneImpl* scene, const char* path, const char* path_preimage, int min_diff)
-	{
-		OS::InputFile file1, file2;
-		if (!file1.open(path))
-		{
-			logError("render_test") << "Failed to open " << path;
-			return 0xffffFFFF;
-		}
-		else if (!file2.open(path_preimage))
-		{
-			file1.close();
-			logError("render_test") << "Failed to open " << path_preimage;
-			return 0xffffFFFF;
-		}
-		unsigned int result = Texture::compareTGA(&file1, &file2, min_diff, scene->m_allocator);
-		file1.close();
-		file2.close();
-		return result;
 	}
 
 
@@ -1742,15 +1684,15 @@ public:
 	}
 
 
-	void setGrassDensity(EntityRef entity, int index, int density) override
+	void setGrassSpacing(EntityRef entity, int index, float spacing) override
 	{
-		m_terrains[entity]->setGrassTypeDensity(index, density);
+		m_terrains[entity]->setGrassTypeSpacing(index, spacing);
 	}
 
 
-	int getGrassDensity(EntityRef entity, int index) override
+	float getGrassSpacing(EntityRef entity, int index) override
 	{
-		return m_terrains[entity]->getGrassTypeDensity(index);
+		return m_terrains[entity]->getGrassTypeSpacing(index);
 	}
 
 
@@ -1794,7 +1736,7 @@ public:
 	{
 		for(int i = entity.index + 1; i < m_model_instances.size(); ++i)
 		{
-			if (m_model_instances[i].flags.isSet(ModelInstance::VALID)) return {i};
+			if (m_model_instances[i].flags.isSet(ModelInstance::VALID)) return EntityPtr{i};
 		}
 		return INVALID_ENTITY;
 	}
@@ -1822,12 +1764,18 @@ public:
 	}
 
 
+	CullResult* getRenderables(const ShiftedFrustum& frustum) const override
+	{
+		return m_culling_system->cull(frustum);
+	}
+
+
 	float getCameraScreenWidth(EntityRef camera) override { return m_cameras[camera].screen_width; }
 	float getCameraScreenHeight(EntityRef camera) override { return m_cameras[camera].screen_height; }
 
 
-	void setGlobalLODMultiplier(float multiplier) { m_lod_multiplier = multiplier; }
-	float getGlobalLODMultiplier() const { return m_lod_multiplier; }
+	void setGlobalLODMultiplier(float multiplier) override { m_lod_multiplier = multiplier; }
+	float getGlobalLODMultiplier() const override { return m_lod_multiplier; }
 
 	Camera& getCamera(EntityRef entity) override { return m_cameras[entity]; }
 
@@ -1864,6 +1812,14 @@ public:
 	{
 		auto& cam = m_cameras[{camera.index}];
 		return Vec2(cam.screen_width, cam.screen_height);
+	}
+
+	FurComponent& getFur(EntityRef e) override {
+		return m_furs[e];
+	}
+
+	HashMap<EntityRef, FurComponent>& getFurs() override {
+		return m_furs;
 	}
 
 	void clearDebugLines() override { m_debug_lines.clear(); }
@@ -2186,19 +2142,19 @@ public:
 			const EntityRef entity{i};
 			const DVec3& pos = universe.getPosition(entity);
 			float scale = universe.getScale(entity);
-			float radius = r.model->getBoundingRadius() * scale;
-			const double dist = (pos - origin).length();
+			float radius = r.model->getOriginBoundingRadius() * scale;
+			const double dist = length(pos - origin);
 			if (dist - radius > cur_dist) continue;
 			
 			float intersection_t;
-			Vec3 rel_pos = (origin - pos).toFloat();
-			if (getRaySphereIntersection(rel_pos, dir, Vec3::ZERO, radius, Ref(intersection_t)) && intersection_t >= 0) {
+			Vec3 rel_pos = Vec3(origin - pos);
+			if (getRaySphereIntersection(rel_pos, dir, Vec3::ZERO, radius, intersection_t) && intersection_t >= 0) {
 				Vec3 aabb_hit;
 				const Quat rot = universe.getRotation(entity).conjugated();
 				const Vec3 rel_dir = rot.rotate(dir);
 				const AABB& aabb = r.model->getAABB();
 				rel_pos = rot.rotate(rel_pos / scale);
-				if (getRayAABBIntersection(rel_pos, rel_dir, aabb.min, aabb.max - aabb.min, Ref(aabb_hit))) {
+				if (getRayAABBIntersection(rel_pos, rel_dir, aabb.min, aabb.max - aabb.min, aabb_hit)) {
 					RayCastModelHit new_hit = r.model->castRay(rel_pos, rel_dir, r.pose);
 					if (new_hit.is_hit && (!hit.is_hit || new_hit.t * scale < hit.t)) {
 						new_hit.entity = entity;
@@ -2206,7 +2162,7 @@ public:
 						hit = new_hit;
 						hit.t *= scale;
 						hit.is_hit = true;
-						cur_dist = dir.length() * hit.t;
+						cur_dist = length(dir) * hit.t;
 					}
 				}
 			}
@@ -2300,6 +2256,19 @@ public:
 		return m_reflection_probes.values();
 	}
 	
+	gpu::TextureHandle getReflectionProbesTexture() override {
+		return m_reflection_probes_texture;
+	}
+
+	void reloadReflectionProbes() {
+		for (i32 i = 0; i < m_reflection_probes.size(); ++i) {
+			ReflectionProbe& probe = m_reflection_probes.at(i);
+			const EntityRef e = m_reflection_probes.getKey(i);
+			load(probe, e);
+		}
+	}
+
+
 	Span<const EnvironmentProbe> getEnvironmentProbes() override {
 		return m_environment_probes.values();
 	}
@@ -2349,12 +2318,12 @@ public:
 	{
 		auto& r = m_model_instances[entity.index];
 
-		float bounding_radius = r.model->getBoundingRadius();
+		float bounding_radius = r.model->getOriginBoundingRadius();
 		float scale = m_universe.getScale(entity);
 		const DVec3 pos = m_universe.getPosition(entity);
 		const float radius = bounding_radius * scale;
 		if(r.flags.isSet(ModelInstance::ENABLED)) {
-			const RenderableTypes type = getRenderableType(*model);
+			const RenderableTypes type = getRenderableType(*model, r.custom_material);
 			m_culling_system->add(entity, (u8)type, pos, radius);
 		}
 		ASSERT(!r.pose);
@@ -2367,9 +2336,19 @@ public:
 		r.meshes = &r.model->getMesh(0);
 		r.mesh_count = r.model->getMeshCount();
 
-		if (r.flags.isSet(ModelInstance::IS_BONE_ATTACHMENT_PARENT))
-		{
-			updateBoneAttachment(m_bone_attachments[entity]);
+		if (r.flags.isSet(ModelInstance::IS_BONE_ATTACHMENT_PARENT)) {
+			for (auto& attachment : m_bone_attachments) {
+				if (attachment.parent_entity == entity) {
+					updateBoneAttachment(attachment);
+				}
+			}
+		}
+
+		for (i32 i = 3; i >= 0; --i) {
+			if (r.model->getLODIndices()[i].to != -1) {
+				r.lod = float(i);
+				break;
+			}
 		}
 
 		while (m_mesh_sort_data.size() < m_model_instances.size()) {
@@ -2418,7 +2397,22 @@ public:
 			material->getObserverCb().bind<&RenderSceneImpl::decalMaterialStateChanged>(this);
 		}
 	}
-
+	
+	void addToMaterialCurveDecalMap(Material* material, EntityRef entity)
+	{
+		CurveDecal& d = m_curve_decals[entity];
+		d.prev_decal = INVALID_ENTITY;
+		auto map_iter = m_material_curve_decal_map.find(material);
+		if(map_iter.isValid()) {
+			d.next_decal = map_iter.value();
+			m_material_curve_decal_map[material] = entity;
+		}
+		else {
+			d.next_decal = INVALID_ENTITY;
+			m_material_curve_decal_map.insert(material, entity);
+			material->getObserverCb().bind<&RenderSceneImpl::curveDecalMaterialStateChanged>(this);
+		}
+	}
 	
 	void addToModelEntityMap(Model* model, EntityRef entity)
 	{
@@ -2427,6 +2421,7 @@ public:
 		auto map_iter = m_model_entity_map.find(model);
 		if(map_iter.isValid()) {
 			r.next_model = map_iter.value();
+			m_model_instances[r.next_model.index].prev_model = entity;
 			m_model_entity_map[model] = entity;
 		}
 		else {
@@ -2454,6 +2449,28 @@ public:
 			else {
 				m_model_entity_map.erase(model);
 				model->getObserverCb().unbind<&RenderSceneImpl::modelStateChanged>(this);
+			}
+		}
+	}
+	
+
+	void removeFromMaterialCurveDecalMap(Material* material, EntityRef entity)
+	{
+		CurveDecal& d = m_curve_decals[entity];
+		if(d.prev_decal.isValid()) {
+			m_curve_decals[(EntityRef)d.prev_decal].next_decal = d.next_decal;
+		}
+		if(d.next_decal.isValid()) {
+			m_curve_decals[(EntityRef)d.next_decal].prev_decal = d.prev_decal;
+		}
+		auto map_iter = m_material_curve_decal_map.find(material);
+		if(map_iter.value() == entity) {
+			if(d.next_decal.isValid()) {
+				m_material_curve_decal_map[material] = (EntityRef)d.next_decal;
+			}
+			else {
+				m_material_curve_decal_map.erase(material);
+				material->getObserverCb().unbind<&RenderSceneImpl::curveDecalMaterialStateChanged>(this);
 			}
 		}
 	}
@@ -2488,7 +2505,7 @@ public:
 		bool no_change = model == old_model && old_model;
 		if (no_change)
 		{
-			old_model->getResourceManager().unload(*old_model);
+			old_model->decRefCount();
 			return;
 		}
 		if (old_model)
@@ -2499,7 +2516,7 @@ public:
 			{
 				m_culling_system->remove(entity);
 			}
-			old_model->getResourceManager().unload(*old_model);
+			old_model->decRefCount();
 		}
 		model_instance.model = model;
 		model_instance.meshes = nullptr;
@@ -2524,10 +2541,10 @@ public:
 		Environment light;
 		light.flags.set(Environment::CAST_SHADOWS);
 		light.entity = entity;
-		light.diffuse_color.set(1, 1, 1);
-		light.diffuse_intensity = 1;
+		light.light_color = Vec3(1, 1, 1);
+		light.direct_intensity = 1;
 		light.indirect_intensity = 1;
-		light.cascades.set(3, 8, 20, 60);
+		light.cascades = Vec4(3, 8, 20, 60);
 
 		if (m_environments.empty()) m_active_global_light_entity = entity;
 
@@ -2540,7 +2557,7 @@ public:
 	{
 		PointLight light;
 		light.entity = entity;
-		light.color.set(1, 1, 1);
+		light.color = Vec3(1, 1, 1);
 		light.intensity = 1;
 		light.fov = degreesToRadians(360);
 		light.flags.base = 0;
@@ -2557,23 +2574,45 @@ public:
 
 	void updateDecalInfo(Decal& decal) const
 	{
-		decal.radius = decal.half_extents.length();
+		decal.radius = length(decal.half_extents);
+		decal.transform = m_universe.getTransform(decal.entity);
+	}
+
+
+	void updateDecalInfo(CurveDecal& decal) const
+	{
+		decal.half_extents.x = maximum(fabsf(decal.bezier_p0.x), fabsf(decal.bezier_p2.x)) + decal.uv_scale.x * 0.5f;
+		decal.half_extents.z = maximum(fabsf(decal.bezier_p0.y), fabsf(decal.bezier_p2.y)) + decal.uv_scale.x * 0.5f;
+		decal.radius = length(decal.half_extents);
 		decal.transform = m_universe.getTransform(decal.entity);
 	}
 
 
 	void createDecal(EntityRef entity)
 	{
-		m_decals.insert(entity, Decal());
-		Decal& decal = m_decals[entity];
+		Decal& decal = m_decals.insert(entity);
 		decal.material = nullptr;
 		decal.entity = entity;
-		decal.half_extents.set(1, 1, 1);
+		decal.half_extents = Vec3(1, 1, 1);
+		decal.uv_scale = Vec2(1);
 		updateDecalInfo(decal);
 
 		m_universe.onComponentCreated(entity, DECAL_TYPE, this);
 	}
 
+	void createCurveDecal(EntityRef entity)
+	{
+		CurveDecal& decal = m_curve_decals.insert(entity);
+		decal.material = nullptr;
+		decal.entity = entity;
+		decal.uv_scale = Vec2(1);
+		decal.half_extents = Vec3(10);
+		decal.bezier_p0 = Vec2(-1, 0);
+		decal.bezier_p2 = Vec2(1, 0);
+		updateDecalInfo(decal);
+
+		m_universe.onComponentCreated(entity, CURVE_DECAL_TYPE, this);
+	}
 
 	void createEnvironmentProbe(EntityRef entity)
 	{
@@ -2594,8 +2633,7 @@ public:
 		ReflectionProbe& probe = m_reflection_probes.insert(entity);
 		probe.guid = randGUID();
 
-		StaticString<MAX_PATH_LENGTH> path;
-		probe.texture = nullptr;
+		StaticString<LUMIX_MAX_PATH> path;
 		probe.flags.set(ReflectionProbe::ENABLED);
 
 		m_universe.onComponentCreated(entity, REFLECTION_PROBE_TYPE, this);
@@ -2633,6 +2671,10 @@ public:
 		m_universe.onComponentCreated(entity, MODEL_INSTANCE_TYPE, this);
 	}
 
+	void updateParticleEmitter(EntityRef entity, float dt) override {
+		if (!m_particle_emitters[entity]) return;
+		m_particle_emitters[entity]->update(dt);
+	}
 
 	void setParticleEmitterPath(EntityRef entity, const Path& path) override
 	{
@@ -2652,38 +2694,47 @@ public:
 		return emitter->getResource()->getPath();
 	}
 
+	void setParticleEmitterRate(EntityRef entity, u32 value) override {
+		ParticleEmitter* emitter = m_particle_emitters[entity];
+		emitter->m_emit_rate = value;
+	}
+
+	u32 getParticleEmitterRate(EntityRef entity) override {
+		return m_particle_emitters[entity]->m_emit_rate;
+	}
 
 	const AssociativeArray<EntityRef, ParticleEmitter*>& getParticleEmitters() const override
 	{
 		return m_particle_emitters;
 	}
 
-private:
 	IAllocator& m_allocator;
 	Universe& m_universe;
 	Renderer& m_renderer;
 	Engine& m_engine;
-	CullingSystem* m_culling_system;
+	UniquePtr<CullingSystem> m_culling_system;
 	u64 m_render_cmps_mask;
 
 	EntityPtr m_active_global_light_entity;
 	HashMap<EntityRef, PointLight> m_point_lights;
 
 	HashMap<EntityRef, Decal> m_decals;
+	HashMap<EntityRef, CurveDecal> m_curve_decals;
 	Array<ModelInstance> m_model_instances;
 	Array<MeshSortData> m_mesh_sort_data;
 	HashMap<EntityRef, Environment> m_environments;
 	HashMap<EntityRef, Camera> m_cameras;
 	EntityPtr m_active_camera = INVALID_ENTITY;
-	AssociativeArray<EntityRef, TextMesh*> m_text_meshes;
 	AssociativeArray<EntityRef, BoneAttachment> m_bone_attachments;
 	AssociativeArray<EntityRef, EnvironmentProbe> m_environment_probes;
 	AssociativeArray<EntityRef, ReflectionProbe> m_reflection_probes;
 	HashMap<EntityRef, Terrain*> m_terrains;
 	AssociativeArray<EntityRef, ParticleEmitter*> m_particle_emitters;
+	gpu::TextureHandle m_reflection_probes_texture = gpu::INVALID_TEXTURE;
 
 	Array<DebugTriangle> m_debug_triangles;
 	Array<DebugLine> m_debug_lines;
+	HashMap<EntityRef, FurComponent> m_furs;
 
 	float m_time;
 	float m_lod_multiplier;
@@ -2692,37 +2743,174 @@ private:
 
 	HashMap<Model*, EntityRef> m_model_entity_map;
 	HashMap<Material*, EntityRef> m_material_decal_map;
+	HashMap<Material*, EntityRef> m_material_curve_decal_map;
 };
 
+ReflectionProbe::LoadJob::~LoadJob() {
+	if (m_handle.isValid()) {
+		m_scene.m_engine.getFileSystem().cancel(m_handle);
+	}
+}
 
+void ReflectionProbe::LoadJob::callback(u64 size, const u8* data, bool success) {
+	ReflectionProbe& probe = m_scene.m_reflection_probes[m_entity];
+	probe.load_job = nullptr;
+	m_handle = FileSystem::AsyncHandle::invalid();
 
-#define COMPONENT_TYPE(type, name) \
-	{ \
-		type \
-		, &RenderSceneImpl::create##name \
-		, &RenderSceneImpl::destroy##name \
+	if (!success) {
+		logError("Failed to load probe ", probe.guid);
+		LUMIX_DELETE(m_allocator, this);
+		return;
 	}
 
-static struct
-{
-	ComponentType type;
-	void (RenderSceneImpl::*creator)(EntityRef);
-	void (RenderSceneImpl::*destroyer)(EntityRef);
-} COMPONENT_INFOS[] = {
-	COMPONENT_TYPE(MODEL_INSTANCE_TYPE, ModelInstance),
-	COMPONENT_TYPE(ENVIRONMENT_TYPE, Environment),
-	COMPONENT_TYPE(POINT_LIGHT_TYPE, PointLight),
-	COMPONENT_TYPE(DECAL_TYPE, Decal),
-	COMPONENT_TYPE(CAMERA_TYPE, Camera),
-	COMPONENT_TYPE(TERRAIN_TYPE, Terrain),
-	COMPONENT_TYPE(BONE_ATTACHMENT_TYPE, BoneAttachment),
-	COMPONENT_TYPE(ENVIRONMENT_PROBE_TYPE, EnvironmentProbe),
-	COMPONENT_TYPE(REFLECTION_PROBE_TYPE, ReflectionProbe),
-	COMPONENT_TYPE(PARTICLE_EMITTER_TYPE, ParticleEmitter),
-	COMPONENT_TYPE(TEXT_MESH_TYPE, TextMesh)
-};
+	struct Job : Renderer::RenderJob {
+		Job(IAllocator& allocator) : data(allocator) {}
 
-#undef COMPONENT_TYPE
+		void setup() override {}
+				
+		void execute() override {
+			gpu::loadLayers(tex, layer, data.data(), (int)data.size(), "reflection probe");
+		}
+
+		u32 layer;
+		OutputMemoryStream data;
+		gpu::TextureHandle tex;
+	};
+			
+	Job& job = m_scene.m_renderer.createJob<Job>(m_allocator);
+	job.layer = probe.texture_id;
+	job.tex = m_scene.m_reflection_probes_texture;
+	job.data.write(data, size);
+	m_scene.m_renderer.queue(job, 0);	
+	LUMIX_DELETE(m_allocator, this);
+}
+
+void RenderScene::reflect() {
+	using namespace reflection;
+
+	struct RotationModeEnum : reflection::EnumAttribute {
+		u32 count(ComponentUID cmp) const override { return 2; }
+		const char* name(ComponentUID cmp, u32 idx) const override {
+			switch((Terrain::GrassType::RotationMode)idx) {
+				case Terrain::GrassType::RotationMode::ALL_RANDOM: return "All random";
+				case Terrain::GrassType::RotationMode::Y_UP: return "Y up";
+				default: ASSERT(false); return "N/A";
+			}
+		}
+	};
+
+	struct BoneEnum : reflection::EnumAttribute {
+		u32 count(ComponentUID cmp) const override {
+			RenderScene* render_scene = static_cast<RenderScene*>(cmp.scene);
+			EntityPtr model_instance = getModelInstance(render_scene, (EntityRef)cmp.entity);
+			if (!model_instance.isValid()) return 0;
+
+			auto* model = render_scene->getModelInstanceModel((EntityRef)model_instance);
+			if (!model || !model->isReady()) return 0;
+
+			return model->getBoneCount();
+		}
+
+		const char* name(ComponentUID cmp, u32 idx) const override {
+			RenderScene* render_scene = static_cast<RenderScene*>(cmp.scene);
+			EntityPtr model_instance = getModelInstance(render_scene, (EntityRef)cmp.entity);
+			if (!model_instance.isValid()) return "";
+
+			auto* model = render_scene->getModelInstanceModel((EntityRef)model_instance);
+			if (!model) return "";
+
+			return idx < (u32)model->getBoneCount() ? model->getBone(idx).name.c_str() : "N/A";
+		}
+
+
+		EntityPtr getModelInstance(RenderScene* render_scene, EntityRef bone_attachment) const {
+			EntityPtr parent_entity = render_scene->getBoneAttachmentParent(bone_attachment);
+			if (!parent_entity.isValid()) return INVALID_ENTITY;
+			return render_scene->getUniverse().hasComponent((EntityRef)parent_entity, MODEL_INSTANCE_TYPE) ? parent_entity : INVALID_ENTITY;
+		}
+	};
+
+	LUMIX_SCENE(RenderSceneImpl, "renderer")
+		.LUMIX_FUNC(RenderSceneImpl::setGlobalLODMultiplier)
+		.LUMIX_FUNC(RenderSceneImpl::getGlobalLODMultiplier)
+		.LUMIX_FUNC(RenderSceneImpl::addDebugCross)
+		.LUMIX_FUNC(RenderSceneImpl::addDebugLine)
+		.LUMIX_FUNC(RenderSceneImpl::addDebugTriangle)
+		.LUMIX_FUNC(RenderSceneImpl::setActiveCamera)
+		.LUMIX_CMP(BoneAttachment, "bone_attachment", "Render / Bone attachment")
+			.icon(ICON_FA_BONE)
+			.LUMIX_PROP(BoneAttachmentParent, "Parent")
+			.LUMIX_PROP(BoneAttachmentPosition, "Relative position")
+			.LUMIX_PROP(BoneAttachmentRotation, "Relative rotation").radiansAttribute()
+			.LUMIX_PROP(BoneAttachmentBone, "Bone").attribute<BoneEnum>() 
+		.LUMIX_CMP(Fur, "fur", "Render / Fur")
+			.var_prop<&RenderScene::getFur, &FurComponent::layers>("Layers")
+			.var_prop<&RenderScene::getFur, &FurComponent::scale>("Scale")
+			.var_prop<&RenderScene::getFur, &FurComponent::gravity>("Gravity")
+			.var_prop<&RenderScene::getFur, &FurComponent::enabled>("Enabled")
+		.LUMIX_CMP(EnvironmentProbe, "environment_probe", "Render / Environment probe")
+			.prop<&RenderScene::isEnvironmentProbeEnabled, &RenderScene::enableEnvironmentProbe>("Enabled")
+			.var_prop<&RenderScene::getEnvironmentProbe, &EnvironmentProbe::inner_range>("Inner range")
+			.var_prop<&RenderScene::getEnvironmentProbe, &EnvironmentProbe::outer_range>("Outer range")
+		.LUMIX_CMP(ReflectionProbe, "reflection_probe", "Render / Reflection probe")
+			.prop<&RenderScene::isReflectionProbeEnabled, &RenderScene::enableReflectionProbe>("Enabled")
+			.var_prop<&RenderScene::getReflectionProbe, &ReflectionProbe::size>("size")
+			.var_prop<&RenderScene::getReflectionProbe, &ReflectionProbe::half_extents>("half_extents")
+		.LUMIX_CMP(ParticleEmitter, "particle_emitter", "Render / Particle emitter")
+			.LUMIX_PROP(ParticleEmitterRate, "Emit rate")
+			.LUMIX_PROP(ParticleEmitterPath, "Source").resourceAttribute(ParticleEmitterResource::TYPE)
+		.LUMIX_CMP(Camera, "camera", "Render / Camera")
+			.icon(ICON_FA_CAMERA)
+			.var_prop<&RenderScene::getCamera, &Camera::fov>("FOV").radiansAttribute()
+			.var_prop<&RenderScene::getCamera, &Camera::near>("Near").minAttribute(0)
+			.var_prop<&RenderScene::getCamera, &Camera::far>("Far").minAttribute(0)
+			.var_prop<&RenderScene::getCamera, &Camera::is_ortho>("Orthographic")
+			.var_prop<&RenderScene::getCamera, &Camera::ortho_size>("Orthographic size").minAttribute(0)
+		.LUMIX_CMP(ModelInstance, "model_instance", "Render / Mesh")
+			.LUMIX_FUNC_EX(RenderScene::getModelInstanceModel, "getModel")
+			.prop<&RenderScene::isModelInstanceEnabled, &RenderScene::enableModelInstance>("Enabled")
+			.prop<&RenderScene::getModelInstanceMaterialOverride,&RenderScene::setModelInstanceMaterialOverride>("Material").noUIAttribute()
+			.LUMIX_PROP(ModelInstancePath, "Source").resourceAttribute(Model::TYPE)
+		.LUMIX_CMP(Environment, "environment", "Render / Environment")
+			.icon(ICON_FA_GLOBE)
+			.var_prop<&RenderScene::getEnvironment, &Environment::light_color>("Color").colorAttribute()
+			.var_prop<&RenderScene::getEnvironment, &Environment::direct_intensity>("Intensity").minAttribute(0)
+			.var_prop<&RenderScene::getEnvironment, &Environment::indirect_intensity>("Indirect intensity").minAttribute(0)
+			.LUMIX_PROP(ShadowmapCascades, "Shadow cascades")
+			.LUMIX_PROP(EnvironmentCastShadows, "Cast shadows")
+		.LUMIX_CMP(PointLight, "point_light", "Render / Point light")
+			.icon(ICON_FA_LIGHTBULB)
+			.LUMIX_PROP(PointLightCastShadows, "Cast shadows")
+			.LUMIX_PROP(PointLightDynamic, "Dynamic")
+			.var_prop<&RenderScene::getPointLight, &PointLight::intensity>("Intensity").minAttribute(0)
+			.var_prop<&RenderScene::getPointLight, &PointLight::fov>("FOV").clampAttribute(0, 360).radiansAttribute()
+			.var_prop<&RenderScene::getPointLight, &PointLight::attenuation_param>("Attenuation").clampAttribute(0, 100)
+			.var_prop<&RenderScene::getPointLight, &PointLight::color>("Color").colorAttribute()
+			.LUMIX_PROP(LightRange, "Range").minAttribute(0)
+		.LUMIX_CMP(Decal, "decal", "Render / Decal")
+			.LUMIX_PROP(DecalMaterialPath, "Material").resourceAttribute(Material::TYPE)
+			.LUMIX_PROP(DecalHalfExtents, "Half extents").minAttribute(0)
+			.var_prop<&RenderScene::getDecal, &Decal::uv_scale>("UV scale").minAttribute(0)
+		.LUMIX_CMP(CurveDecal, "curve_decal", "Render / Curve decal")
+			.LUMIX_PROP(CurveDecalMaterialPath, "Material").resourceAttribute(Material::TYPE)
+			.LUMIX_PROP(CurveDecalHalfExtents, "Half extents").minAttribute(0)
+			.LUMIX_PROP(CurveDecalUVScale, "UV scale").minAttribute(0)
+			.LUMIX_PROP(CurveDecalBezierP0, "Bezier P0").noUIAttribute()
+			.LUMIX_PROP(CurveDecalBezierP2, "Bezier P2").noUIAttribute()
+		.LUMIX_CMP(Terrain, "terrain", "Render / Terrain")
+			.LUMIX_FUNC(RenderScene::getTerrainNormalAt)
+			.LUMIX_FUNC(RenderScene::getTerrainHeightAt)
+			.LUMIX_PROP(TerrainMaterialPath, "Material").resourceAttribute(Material::TYPE)
+			.LUMIX_PROP(TerrainXZScale, "XZ scale").minAttribute(0)
+			.LUMIX_PROP(TerrainYScale, "Height scale").minAttribute(0)
+			.begin_array<&RenderScene::getGrassCount, &RenderScene::addGrass, &RenderScene::removeGrass>("grass")
+				.LUMIX_PROP(GrassPath, "Mesh").resourceAttribute(Model::TYPE)
+				.LUMIX_PROP(GrassDistance, "Distance").minAttribute(1)
+				.LUMIX_PROP(GrassSpacing, "Spacing")
+				.LUMIX_PROP(GrassRotationMode, "Mode").attribute<RotationModeEnum>()
+			.end_array()
+	;
+}
 
 RenderSceneImpl::RenderSceneImpl(Renderer& renderer,
 	Engine& engine,
@@ -2735,11 +2923,11 @@ RenderSceneImpl::RenderSceneImpl(Renderer& renderer,
 	, m_model_entity_map(m_allocator)
 	, m_model_instances(m_allocator)
 	, m_cameras(m_allocator)
-	, m_text_meshes(m_allocator)
 	, m_terrains(m_allocator)
 	, m_point_lights(m_allocator)
 	, m_environments(m_allocator)
 	, m_decals(m_allocator)
+	, m_curve_decals(m_allocator)
 	, m_debug_triangles(m_allocator)
 	, m_debug_lines(m_allocator)
 	, m_active_global_light_entity(INVALID_ENTITY)
@@ -2753,7 +2941,9 @@ RenderSceneImpl::RenderSceneImpl(Renderer& renderer,
 	, m_time(0)
 	, m_is_updating_attachments(false)
 	, m_material_decal_map(m_allocator)
+	, m_material_curve_decal_map(m_allocator)
 	, m_mesh_sort_data(m_allocator)
+	, m_furs(m_allocator)
 {
 
 	m_universe.entityTransformed().bind<&RenderSceneImpl::onEntityMoved>(this);
@@ -2763,49 +2953,37 @@ RenderSceneImpl::RenderSceneImpl(Renderer& renderer,
 	m_mesh_sort_data.reserve(5000);
 
 	m_render_cmps_mask = 0;
-	for (auto& i : COMPONENT_INFOS)
-	{
-		m_render_cmps_mask |= (u64)1 << i.type.index;
-		universe.registerComponentType(i.type, this, i.creator, i.destroyer);
+
+	Renderer::MemRef mem;
+	m_reflection_probes_texture = renderer.createTexture(128, 128, 32, gpu::TextureFormat::BC3, gpu::TextureFlags::IS_CUBE, mem, "reflection_probes");
+
+	const u32 hash = crc32("renderer");
+	for (const reflection::RegisteredComponent& cmp : reflection::getComponents()) {
+		if (cmp.scene == hash) {
+			m_render_cmps_mask |= (u64)1 << cmp.cmp->component_type.index;
+		}
 	}
 }
 
 
-RenderScene* RenderScene::createInstance(Renderer& renderer,
+UniquePtr<RenderScene> RenderScene::createInstance(Renderer& renderer,
 	Engine& engine,
 	Universe& universe,
 	IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, RenderSceneImpl)(renderer, engine, universe, allocator);
-}
-
-
-void RenderScene::destroyInstance(RenderScene* scene)
-{
-	LUMIX_DELETE(scene->getAllocator(), static_cast<RenderSceneImpl*>(scene));
+	return UniquePtr<RenderSceneImpl>::create(allocator, renderer, engine, universe, allocator);
 }
 
 
 void RenderScene::registerLuaAPI(lua_State* L)
 {
-	Model::registerLuaAPI(L);
-
 	#define REGISTER_FUNCTION(F)\
 		do { \
 			auto f = &LuaWrapper::wrapMethod<&RenderSceneImpl::F>; \
 			LuaWrapper::createSystemFunction(L, "Renderer", #F, f); \
 		} while(false) \
 
-	REGISTER_FUNCTION(setGlobalLODMultiplier);
-	REGISTER_FUNCTION(getGlobalLODMultiplier);
-	//REGISTER_FUNCTION(getActiveEnvironment);
-	REGISTER_FUNCTION(getModelInstanceModel);
-	REGISTER_FUNCTION(addDebugCross);
-	REGISTER_FUNCTION(addDebugLine);
 	REGISTER_FUNCTION(getTerrainMaterial);
-	REGISTER_FUNCTION(getTerrainNormalAt);
-	REGISTER_FUNCTION(setTerrainHeightAt);
-	//REGISTER_FUNCTION(enableModelInstance);
 	REGISTER_FUNCTION(getPoseBonePosition);
 
 	#undef REGISTER_FUNCTION
@@ -2816,15 +2994,8 @@ void RenderScene::registerLuaAPI(lua_State* L)
 		LuaWrapper::createSystemFunction(L, "Renderer", #F, f); \
 		} while(false) \
 
-	REGISTER_FUNCTION(createPipeline);
-	REGISTER_FUNCTION(destroyPipeline);
-	REGISTER_FUNCTION(setPipelineScene);
-	REGISTER_FUNCTION(getPipelineScene);
-	//REGISTER_FUNCTION(setModelInstancePath);
 	REGISTER_FUNCTION(getModelBoneIndex);
 	REGISTER_FUNCTION(makeScreenshot);
-	REGISTER_FUNCTION(compareTGA);
-	REGISTER_FUNCTION(getTerrainHeightAt);
 
 	LuaWrapper::createSystemFunction(L, "Renderer", "castCameraRay", &RenderSceneImpl::LUA_castCameraRay);
 

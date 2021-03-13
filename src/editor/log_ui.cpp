@@ -20,7 +20,7 @@ LogUI::LogUI(IAllocator& allocator)
 	, m_are_notifications_hovered(false)
 	, m_move_notifications_to_front(false)
 {
-	getLogCallback().bind<&LogUI::onLog>(this);
+	registerLogCallback<&LogUI::onLog>(this);
 
 	for (int i = 0; i < (int)LogLevel::COUNT; ++i)
 	{
@@ -31,7 +31,7 @@ LogUI::LogUI(IAllocator& allocator)
 
 LogUI::~LogUI()
 {
-	getLogCallback().unbind<&LogUI::onLog>(this);
+	unregisterLogCallback<&LogUI::onLog>(this);
 }
 
 
@@ -60,7 +60,7 @@ void LogUI::push(LogLevel level, const char* message)
 }
 
 
-void LogUI::onLog(LogLevel level, const char* system, const char* message)
+void LogUI::onLog(LogLevel level, const char* message)
 {
 	push(level, message);
 }
@@ -94,7 +94,7 @@ void LogUI::showNotifications()
 
 	if (ImGui::Button("Close")) m_notifications.clear();
 
-	if (m_move_notifications_to_front) ImGui::BringToFront();
+	if (m_move_notifications_to_front) ImGuiEx::BringToFront();
 	m_move_notifications_to_front = false;
 	for (int i = 0; i < m_notifications.size(); ++i)
 	{
@@ -159,7 +159,8 @@ void LogUI::onGUI()
 		ImGui::SameLine();
 		char filter[128] = "";
 		ImGui::Checkbox("Autoscroll", &m_autoscroll);
-		ImGui::SetNextItemWidth(-20);
+		const float w = ImGui::CalcTextSize(ICON_FA_TIMES).x + ImGui::GetStyle().ItemSpacing.x * 2;
+		ImGui::SetNextItemWidth(-w);
 		ImGui::InputTextWithHint("##filter", "Filter", filter, sizeof(filter));
 		ImGui::SameLine();
 		if (ImGuiEx::IconButton(ICON_FA_TIMES, "Clear filter")) {
@@ -213,7 +214,7 @@ void LogUI::onGUI()
 						}
 					}
 
-					OS::copyToClipboard(mem);
+					os::copyToClipboard(mem);
 					m_allocator.deallocate(mem);
 				}
 			}

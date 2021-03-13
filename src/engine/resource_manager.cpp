@@ -21,7 +21,7 @@ void ResourceManager::destroy()
 		Resource* resource = iter.value();
 		if (!resource->isEmpty())
 		{
-			logError("Engine") << "Leaking resource " << resource->getPath().c_str() << "\n";
+			logError("Leaking resource ", resource->getPath(), "\n");
 		}
 		destroyResource(*resource);
 	}
@@ -42,7 +42,7 @@ Resource* ResourceManager::get(const Path& path)
 
 Resource* ResourceManager::load(const Path& path)
 {
-	if (!path.isValid()) return nullptr;
+	if (path.isEmpty()) return nullptr;
 	Resource* resource = get(path);
 
 	if(nullptr == resource)
@@ -56,14 +56,14 @@ Resource* ResourceManager::load(const Path& path)
 		if (m_owner->onBeforeLoad(*resource) == ResourceManagerHub::LoadHook::Action::DEFERRED)
 		{
 			resource->m_desired_state = Resource::State::READY;
-			resource->addRef(); // for hook
-			resource->addRef(); // for return value
+			resource->incRefCount(); // for hook
+			resource->incRefCount(); // for return value
 			return resource;
 		}
 		resource->doLoad();
 	}
 
-	resource->addRef();
+	resource->incRefCount();
 	return resource;
 }
 
@@ -79,39 +79,8 @@ void ResourceManager::removeUnreferenced()
 
 	for (auto* i : to_remove)
 	{
-		m_resources.erase(i->getPath().getHash());
-		destroyResource(*i);
-	}
-}
-
-void ResourceManager::load(Resource& resource)
-{
-	if(resource.isEmpty() && resource.m_desired_state == Resource::State::EMPTY)
-	{
-		if (m_owner->onBeforeLoad(resource) == ResourceManagerHub::LoadHook::Action::DEFERRED)
-		{
-			resource.addRef(); // for hook
-			return;
-		}
-		resource.doLoad();
-	}
-
-	resource.addRef();
-}
-
-void ResourceManager::unload(const Path& path)
-{
-	Resource* resource = get(path);
-	if (resource) unload(*resource);
-}
-
-void ResourceManager::unload(Resource& resource)
-{
-	int new_ref_count = resource.remRef();
-	ASSERT(new_ref_count >= 0);
-	if(new_ref_count == 0 && m_is_unload_enabled)
-	{
-		resource.doUnload();
+		auto iter = m_resources.find(i->getPath().getHash());
+		if (iter.value()->isReady()) iter.value()->doUnload();
 	}
 }
 
@@ -127,8 +96,8 @@ void ResourceManager::reload(Resource& resource)
 	if (m_owner->onBeforeLoad(resource) == ResourceManagerHub::LoadHook::Action::DEFERRED)
 	{
 		resource.m_desired_state = Resource::State::READY;
-		resource.addRef(); // for hook
-		resource.addRef(); // for return value
+		resource.incRefCount(); // for hook
+		resource.incRefCount(); // for return value
 	}
 	else {
 		resource.doLoad();
@@ -199,7 +168,7 @@ ResourceManager* ResourceManagerHub::get(ResourceType type)
 void ResourceManagerHub::LoadHook::continueLoad(Resource& resource)
 {
 	ASSERT(resource.isEmpty());
-	resource.remRef(); // release from hook
+	resource.decRefCount(); // release from hook
 	resource.m_desired_state = Resource::State::EMPTY;
 	resource.doLoad();
 }
@@ -240,6 +209,26 @@ void ResourceManagerHub::enableUnload(bool enable)
 		manager->enableUnload(enable);
 	}
 }
+
+void ResourceManagerHub::reloadAll() {
+	while (m_file_system->hasWork()) m_file_system->processCallbacks();
+	
+	Array<Resource*> to_reload(m_allocator);
+	for (auto* manager : m_resource_managers) {
+		ResourceManager::ResourceTable& resources = manager->getResourceTable();
+		for (Resource* res : resources) {
+			if (res->isReady()) {
+				res->doUnload();
+				to_reload.push(res);
+			}
+		}
+	}
+
+	for (Resource* res : to_reload) {
+		res->doLoad();
+	}
+}
+
 
 void ResourceManagerHub::reload(const Path& path)
 {

@@ -1,7 +1,7 @@
 sky = -1
 Editor.setPropertyType(this, "sky", Editor.RESOURCE_PROPERTY, "texture")
 
-function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer_depth, shadowmap)
+function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer2, gbuffer_depth, shadowmap)
 	if not enabled then return hdr_buffer end
 	if transparent_phase ~= "pre" then return hdr_buffer end
 	if sky == -1 then return hdr_buffer end
@@ -9,7 +9,7 @@ function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbu
 	if env.cubemap_sky_shader == nil then
 		env.cubemap_sky_shader = env.preloadShader("pipelines/cubemap_sky.shd")
 	end
-	env.setRenderTargets(hdr_buffer, gbuffer_depth)
+	env.setRenderTargetsDS(hdr_buffer, gbuffer_depth)
 	env.bindTextures({sky}, 0)
 	local state = {
 		stencil_write_mask = 0,

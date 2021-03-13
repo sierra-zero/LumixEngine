@@ -38,6 +38,7 @@ struct FBXImporter
 		float lods_distances[4] = {-10, -100, -1000, -10000};
 		float position_error = 0.02f;
 		float rotation_error = 0.001f;
+		float radius_scale = 1.f;
 	};
 
 
@@ -69,9 +70,8 @@ struct FBXImporter
 	{
 		const ofbx::AnimationStack* fbx = nullptr;
 		const ofbx::IScene* scene = nullptr;
-		StaticString<MAX_PATH_LENGTH> name;
+		StaticString<LUMIX_MAX_PATH> name;
 		bool import = true;
-		int root_motion_bone_idx = -1;
 	};
 
 	struct ImportTexture
@@ -88,8 +88,8 @@ struct FBXImporter
 		bool import = true;
 		bool to_dds = true;
 		bool is_valid = false;
-		StaticString<MAX_PATH_LENGTH> path;
-		StaticString<MAX_PATH_LENGTH> src;
+		StaticString<LUMIX_MAX_PATH> path;
+		StaticString<LUMIX_MAX_PATH> src;
 	};
 
 	struct ImportMaterial
@@ -107,6 +107,7 @@ struct FBXImporter
 			: indices(allocator)
 			, vertex_data(allocator)
 			, computed_tangents(allocator)
+			, computed_normals(allocator)
 		{
 		}
 
@@ -114,6 +115,7 @@ struct FBXImporter
 		Array<u32> indices;
 		OutputMemoryStream vertex_data;
 		Array<ofbx::Vec3> computed_tangents;
+		Array<ofbx::Vec3> computed_normals;
 		u32 unique_vertex_count;
 	};
 
@@ -135,12 +137,15 @@ struct FBXImporter
 		OutputMemoryStream vertex_data;
 		Array<int> indices;
 		AABB aabb;
-		float radius_squared;
+		float origin_radius_squared;
+		float center_radius_squared;
 		Matrix transform_matrix = Matrix::IDENTITY;
+		Vec3 origin = Vec3(0);
 	};
 
 	FBXImporter(struct StudioApp& app);
 	~FBXImporter();
+	void init();
 	bool setSource(const char* filename, bool ignore_geometry, bool force_skinned);
 	void writeMaterials(const char* src, const ImportConfig& cfg);
 	void writeAnimations(const char* src, const ImportConfig& cfg);
@@ -148,7 +153,7 @@ struct FBXImporter
 	void writePrefab(const char* src, const ImportConfig& cfg);
 	void writeModel(const char* src, const ImportConfig& cfg);
 	void writePhysics(const char* src, const ImportConfig& cfg);
-	bool createImpostorTextures(struct Model* model, Ref<Array<u32>> gb0_rgba, Ref<Array<u32>> gb1_rgba, Ref<IVec2> size);
+	bool createImpostorTextures(struct Model* model, Array<u32>& gb0_rgba, Array<u32>& gb1_rgba, Array<u32>& shadow, IVec2& size);
 
 	const Array<ImportMesh>& getMeshes() const { return m_meshes; }
 	const Array<ImportAnimation>& getAnimations() const { return m_animations; }
@@ -157,9 +162,10 @@ struct FBXImporter
 	ofbx::IScene* getOFBXScene() { return scene; }
 
 private:
+	bool findTexture(const char* src_dir, const char* ext, FBXImporter::ImportTexture& tex) const;
 	const ImportGeometry& getImportGeometry(const ofbx::Geometry* geom) const;
 	const ImportMesh* getAnyMeshFromBone(const ofbx::Object* node, int bone_idx) const;
-	void gatherMaterials(const char* src_dir);
+	void gatherMaterials(const char* fbx_filename, const char* src_dir);
 
 	void sortBones(bool force_skinned);
 	void gatherBones(const ofbx::IScene& scene, bool force_skinned);
@@ -193,12 +199,14 @@ private:
 	IAllocator& m_allocator;
 	struct FileSystem& m_filesystem;
 	StudioApp& m_app;
+	struct Shader* m_impostor_shadow_shader = nullptr;
 	struct AssetCompiler& m_compiler;
 	Array<ImportMaterial> m_materials;
 	Array<ImportMesh> m_meshes;
 	Array<ImportGeometry> m_geometries;
 	Array<ImportAnimation> m_animations;
 	Array<const ofbx::Object*> m_bones;
+	Array<Matrix> m_bind_pose;
 	ofbx::IScene* scene;
 	OutputMemoryStream out_file;
 	float m_time_scale = 1.0f;

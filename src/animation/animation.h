@@ -1,8 +1,8 @@
 #pragma once
 
 #include "engine/hash_map.h"
-#include "engine/math.h"
 #include "engine/resource.h"
+#include "engine/string.h"
 
 namespace Lumix
 {
@@ -16,6 +16,7 @@ struct Vec3;
 struct BoneMask
 {
 	BoneMask(IAllocator& allocator) : bones(allocator) {}
+	BoneMask(BoneMask&& rhs) = default;
 	StaticString<32> name;
 	HashMap<u32, u8, HashFuncDirect<u32>> bones;
 };
@@ -46,7 +47,6 @@ struct Animation final : Resource
 
 		ResourceType getType() const override { return TYPE; }
 
-		int getRootMotionBoneIdx() const { return m_root_motion_bone_idx; }
 		Vec3 getTranslation(Time time, u32 curve_idx) const;
 		Quat getRotation(Time time, u32 curve_idx) const;
 		int getTranslationCurveIndex(u32 name_hash) const;

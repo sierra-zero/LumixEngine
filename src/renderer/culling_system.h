@@ -8,8 +8,8 @@ namespace Lumix
 {
 
 template <typename T> struct Array;
+template <typename T> struct UniquePtr;
 struct DVec3;
-struct Frustum;
 struct IAllocator;
 struct PageAllocator;
 struct ShiftedFrustum;
@@ -40,6 +40,7 @@ struct CullResult {
 	struct {
 		CullResult* next = nullptr;
 		u32 count = 0;
+		u8 type;
 	} header;
 	EntityRef entities[(16384 - sizeof(header)) / sizeof(EntityRef)];
 };
@@ -49,12 +50,12 @@ struct LUMIX_RENDERER_API CullingSystem
 	CullingSystem() { }
 	virtual ~CullingSystem() { }
 
-	static CullingSystem* create(IAllocator& allocator, PageAllocator& page_allocator);
-	static void destroy(CullingSystem& culling_system);
+	static UniquePtr<CullingSystem> create(IAllocator& allocator, PageAllocator& page_allocator);
 
 	virtual void clear() = 0;
 
 	virtual CullResult* cull(const ShiftedFrustum& frustum, u8 type) = 0;
+	virtual CullResult* cull(const ShiftedFrustum& frustum) = 0;
 
 	virtual bool isAdded(EntityRef entity) = 0;
 	virtual void add(EntityRef entity, u8 type, const DVec3& pos, float radius) = 0;

@@ -8,9 +8,10 @@
 #include "editor/world_editor.h"
 #include "engine/crc32.h"
 #include "engine/engine.h"
+#include "engine/file_system.h"
 #include "engine/geometry.h"
 #include "engine/log.h"
-#include "engine/reflection.h"
+#include "engine/os.h"
 #include "engine/universe.h"
 #include "navigation/navigation_scene.h"
 
@@ -22,12 +23,15 @@ namespace
 {
 
 
-static const ComponentType NAVMESH_AGENT_TYPE = Reflection::getComponentType("navmesh_agent");
-static const ComponentType NAVMESH_ZONE_TYPE = Reflection::getComponentType("navmesh_zone");
+static const ComponentType NAVMESH_AGENT_TYPE = reflection::getComponentType("navmesh_agent");
+static const ComponentType NAVMESH_ZONE_TYPE = reflection::getComponentType("navmesh_zone");
 
 
 struct PropertyGridPlugin : PropertyGrid::IPlugin {
 	PropertyGridPlugin(StudioApp& app) : m_app(app) {}
+	~PropertyGridPlugin() {
+		ASSERT(!m_job);
+	}
 
 	void onAgentGUI(EntityRef entity) {
 		auto* scene = static_cast<NavigationScene*>(m_app.getWorldEditor().getUniverse()->getScene(crc32("navigation")));
@@ -40,7 +44,7 @@ struct PropertyGridPlugin : PropertyGrid::IPlugin {
 				Vec3 pos = *(Vec3*)agent->npos;
 				Vec3 corner = *(Vec3*)agent->targetPos;
 
-				ImGui::LabelText("Target distance", "%f", (pos - corner).length());
+				ImGui::LabelText("Target distance", "%f", length(pos - corner));
 			}
 
 			static const char* STATES[] = { "Invalid", "Walking", "Offmesh" };
@@ -53,8 +57,37 @@ struct PropertyGridPlugin : PropertyGrid::IPlugin {
 		if (debug_draw_path) scene->debugDrawPath(entity);
 	}
 
+	void update() override {
+		if (!m_job) return;
+		auto* scene = static_cast<NavigationScene*>(m_app.getWorldEditor().getUniverse()->getScene(NAVMESH_AGENT_TYPE));
+		if (m_job->isFinished()) {
+			scene->free(m_job);
+			m_job = nullptr;
+			return;
+		}
+		
+		const float ui_width = maximum(300.f, ImGui::GetIO().DisplaySize.x * 0.33f);
+		const ImVec2 pos = ImGui::GetMainViewport()->Pos;
+		ImGui::SetNextWindowPos(ImVec2((ImGui::GetIO().DisplaySize.x - ui_width) * 0.5f + pos.x, 30 + pos.y));
+		ImGui::SetNextWindowSize(ImVec2(ui_width, -1));
+		ImGui::SetNextWindowSizeConstraints(ImVec2(-FLT_MAX, 0), ImVec2(FLT_MAX, 200));
+		ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar 
+			| ImGuiWindowFlags_AlwaysAutoResize
+			| ImGuiWindowFlags_NoMove
+			| ImGuiWindowFlags_NoSavedSettings;
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1);
+		if (ImGui::Begin("Navmesh building", nullptr, flags)) {
+			ImGui::Text("%s", "Building navmesh...");
+			ImGui::Text("%s", "Manipulating with entities at this time can produce incorrect results and even crashes.");
+			float progress = m_job->getProgress();
+			ImGui::ProgressBar(progress, ImVec2(-1, 0), StaticString<64>(i32(progress * 100), "%"));
+		}
+		ImGui::End();
+		ImGui::PopStyleVar();
+	}
+
 	void onGUI(PropertyGrid& grid, ComponentUID cmp) override {
-		auto* scene = static_cast<NavigationScene*>(m_app.getWorldEditor().getUniverse()->getScene(crc32("navigation")));
+		auto* scene = static_cast<NavigationScene*>(m_app.getWorldEditor().getUniverse()->getScene(NAVMESH_AGENT_TYPE));
 		if(cmp.type == NAVMESH_AGENT_TYPE) { 
 			onAgentGUI((EntityRef)cmp.entity);
 			return;
@@ -62,37 +95,27 @@ struct PropertyGridPlugin : PropertyGrid::IPlugin {
 
 		if (cmp.type != NAVMESH_ZONE_TYPE) return;
 		
-		if (ImGui::Button("Generate")) {
-			scene->generateNavmesh((EntityRef)cmp.entity);
+		if (m_job) {
+			ImGui::TextUnformatted("Generating...");
 		}
+		else if (ImGui::Button("Generate")) {
+			m_job = scene->generateNavmesh((EntityRef)cmp.entity);
+		}
+
 		ImGui::SameLine();
 		FileSystem& fs = m_app.getEngine().getFileSystem();
 		if (ImGui::Button("Load")) {
-			char path[MAX_PATH_LENGTH];
-			if (OS::getOpenFilename(Span(path), "Navmesh\0*.nav\0", nullptr)) {
-				char rel[MAX_PATH_LENGTH];
-				if (fs.makeRelative(Span(rel), path)) {
-					scene->load((EntityRef)cmp.entity, rel);
-				}
-				else {
-					logError("Navigation") << "Can not load " << path << " because it's not in root directory.";
-				}
-			}		
+			scene->loadZone((EntityRef)cmp.entity);
 		}
 
 		if(scene->isNavmeshReady((EntityRef)cmp.entity)) {
 			ImGui::SameLine();
 			if (ImGui::Button("Save")) {
-				char path[MAX_PATH_LENGTH];
-				if (OS::getSaveFilename(Span(path), "Navmesh\0*.nav\0", "nav")) {
-					char rel[MAX_PATH_LENGTH];
-					if (fs.makeRelative(Span(rel), path)) {
-						scene->save((EntityRef)cmp.entity, rel);
-					}
-					else {
-						logError("Renderer") << "Can not save " << path << " because it's not in root directory.";
-					}
+				StaticString<LUMIX_MAX_PATH> dir(m_app.getEngine().getFileSystem().getBasePath(), "/universes/navzones/");
+				if (!os::makePath(dir) && !os::dirExists(dir)) {
+					logError("Could not create ", dir);
 				}
+				scene->saveZone((EntityRef)cmp.entity);
 			}
 		}
 		ImGui::SameLine();
@@ -135,6 +158,7 @@ struct PropertyGridPlugin : PropertyGrid::IPlugin {
 	}
 
 	StudioApp& m_app;
+	NavmeshBuildJob* m_job = nullptr;
 };
 
 
@@ -142,23 +166,15 @@ struct StudioAppPlugin : StudioApp::IPlugin
 {
 	StudioAppPlugin(StudioApp& app)
 		: m_app(app)
+		, m_zone_pg_plugin(app)
 	{}
 	
 	void init() override {
-		IAllocator& allocator = m_app.getAllocator();
-
-		m_zone_pg_plugin = LUMIX_NEW(allocator, PropertyGridPlugin)(m_app);
-		m_app.getPropertyGrid().addPlugin(*m_zone_pg_plugin);
-
-		m_app.registerComponent(ICON_FA_STREET_VIEW, "navmesh_agent", "Navmesh / Agent");
-		m_app.registerComponent(ICON_FA_MAP_MARKED_ALT, "navmesh_zone", "Navmesh / Zone");
+		m_app.getPropertyGrid().addPlugin(m_zone_pg_plugin);
 	}
 
 	~StudioAppPlugin() {
-		IAllocator& allocator = m_app.getAllocator();
-
-		m_app.getPropertyGrid().removePlugin(*m_zone_pg_plugin);
-		LUMIX_DELETE(allocator, m_zone_pg_plugin);
+		m_app.getPropertyGrid().removePlugin(m_zone_pg_plugin);
 	}
 
 	const char* getName() const override {
@@ -187,7 +203,7 @@ struct StudioAppPlugin : StudioApp::IPlugin
 	}
 
 	StudioApp& m_app;
-	PropertyGridPlugin* m_zone_pg_plugin;
+	PropertyGridPlugin m_zone_pg_plugin;
 };
 
 

@@ -1,5 +1,6 @@
 #include "engine/allocator.h"
 #include "engine/crt.h"
+#include "engine/delegate.h"
 #include "engine/thread.h"
 #include "engine/profiler.h"
 #include "engine/string.h"
@@ -40,7 +41,7 @@ struct FileSystemWatcherTask final : Thread
 	HANDLE m_handle;
 	DWORD m_received;
 	OVERLAPPED m_overlapped;
-	char m_path[MAX_PATH_LENGTH];
+	char m_path[LUMIX_MAX_PATH];
 	FileSystemWatcherPC& m_watcher;
 };
 
@@ -89,23 +90,14 @@ struct FileSystemWatcherPC final : FileSystemWatcher
 };
 
 
-FileSystemWatcher* FileSystemWatcher::create(const char* path, IAllocator& allocator)
+UniquePtr<FileSystemWatcher> FileSystemWatcher::create(const char* path, IAllocator& allocator)
 {
-	FileSystemWatcherPC* watcher = LUMIX_NEW(allocator, FileSystemWatcherPC)(allocator);
+	UniquePtr<FileSystemWatcherPC> watcher = UniquePtr<FileSystemWatcherPC>::create(allocator, allocator);
 	if (!watcher->start(path))
 	{
-		LUMIX_DELETE(allocator, watcher);
-		return nullptr;
+		return UniquePtr<FileSystemWatcher>();
 	}
-	return watcher;
-}
-
-
-void FileSystemWatcher::destroy(FileSystemWatcher* watcher)
-{
-	if (!watcher) return;
-	FileSystemWatcherPC* pc_watcher = (FileSystemWatcherPC*)watcher;
-	LUMIX_DELETE(pc_watcher->m_allocator, pc_watcher);
+	return watcher.move();
 }
 
 

@@ -8,7 +8,7 @@
 #include "engine/crt.h"
 
 
-namespace Lumix::Anim {
+namespace Lumix::anim {
 
 
 
@@ -144,7 +144,7 @@ static Blend1DActivePair getActivePair(const Blend1DNode& node, float input_val)
 	return { &children[0], nullptr, 0 };
 }
 
-void Blend1DNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const {
+void Blend1DNode::update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const {
 	Time t = ctx.input_runtime.read<Time>();
 	const Time t0 = t;
 	t += ctx.time_delta;
@@ -156,7 +156,7 @@ void Blend1DNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_moti
 	root_motion = getRootMotion(ctx, pair.a->slot, t0, t);
 	if (pair.b) {
 		const LocalRigidTransform tr1 = getRootMotion(ctx, pair.b->slot, t0, t);
-		root_motion = root_motion->interpolate(tr1, pair.t);
+		root_motion = root_motion.interpolate(tr1, pair.t);
 	}
 }
 
@@ -169,32 +169,33 @@ void Blend1DNode::skip(RuntimeContext& ctx) const {
 	ctx.input_runtime.skip(sizeof(Time));
 }
 
-static void getPose(const RuntimeContext& ctx, Time time, float weight, u32 slot, Ref<Pose> pose, u32 mask_idx) {
+static void getPose(const RuntimeContext& ctx, Time time, float weight, u32 slot, Pose& pose, u32 mask_idx, bool looped) {
 	Animation* anim = ctx.animations[slot];
 	if (!anim) return;
 	if (!ctx.model->isReady()) return;
+	if (!anim->isReady()) return;
 
-	const Time anim_time = time % anim->getLength();
+	const Time anim_time = looped ? time % anim->getLength() : minimum(time, anim->getLength());
 
 	const BoneMask* mask = mask_idx < (u32)ctx.controller.m_bone_masks.size() ? &ctx.controller.m_bone_masks[mask_idx] : nullptr;
 	anim->getRelativePose(anim_time, pose, *ctx.model, weight, mask);
 }
 
-void Blend1DNode::getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const {
+void Blend1DNode::getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const {
 	const Time t = ctx.input_runtime.read<Time>();
 
 	if (m_children.empty()) return;
 	if (m_children.size() == 1) {
-		Anim::getPose(ctx, t, weight, m_children[0].slot, pose, mask);
+		anim::getPose(ctx, t, weight, m_children[0].slot, pose, mask, true);
 		return;
 	}
 
 	const float input_val = getInputValue(ctx, m_input_index);
 	const Blend1DActivePair pair = getActivePair(*this, input_val);
 	
-	Anim::getPose(ctx, t, weight, pair.a->slot, pose, mask);
+	anim::getPose(ctx, t, weight, pair.a->slot, pose, mask, true);
 	if (pair.b) {
-		Anim::getPose(ctx, t, weight * pair.t, pair.b->slot, pose, mask);
+		anim::getPose(ctx, t, weight * pair.t, pair.b->slot, pose, mask, true);
 	}
 }
 
@@ -218,7 +219,7 @@ AnimationNode::AnimationNode(GroupNode* parent, IAllocator& allocator)
 	: Node(parent, allocator) 
 {}
 
-void AnimationNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const {
+void AnimationNode::update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const {
 	Time t = ctx.input_runtime.read<Time>();
 	Time prev_t = t;
 	t += ctx.time_delta;
@@ -250,19 +251,21 @@ void AnimationNode::skip(RuntimeContext& ctx) const {
 	ctx.input_runtime.skip(sizeof(Time));
 }
 	
-void AnimationNode::getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const {
+void AnimationNode::getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const {
 	const Time t = ctx.input_runtime.read<Time>();
-	Anim::getPose(ctx, t, weight, m_slot, pose, mask);
+	anim::getPose(ctx, t, weight, m_slot, pose, mask, m_flags & LOOPED);
 }
 
 void AnimationNode::serialize(OutputMemoryStream& stream) const {
 	Node::serialize(stream);
 	stream.write(m_slot);
+	stream.write(m_flags);
 }
 
 void AnimationNode::deserialize(InputMemoryStream& stream, Controller& ctrl) {
 	Node::deserialize(stream, ctrl);
 	stream.read(m_slot);
+	stream.read(m_flags);
 }
 
 LayersNode::Layer::Layer(GroupNode* parent, IAllocator& allocator) 
@@ -278,10 +281,10 @@ LayersNode::LayersNode(GroupNode* parent, IAllocator& allocator)
 {
 }
 
-void LayersNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const {
+void LayersNode::update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const {
 	for (const Layer& layer : m_layers) {
 		LocalRigidTransform tmp_rm;
-		layer.node.update(ctx, Ref(tmp_rm));
+		layer.node.update(ctx, tmp_rm);
 		if (&layer == m_layers.begin()) {
 			root_motion = tmp_rm;
 		}
@@ -300,7 +303,7 @@ void LayersNode::skip(RuntimeContext& ctx) const {
 	}
 }
 
-void LayersNode::getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const {
+void LayersNode::getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const {
 	for (const Layer& layer : m_layers) {
 		layer.node.getPose(ctx, weight, pose, layer.mask);
 	}
@@ -338,7 +341,7 @@ GroupNode::~GroupNode() {
 	}
 }
 
-void GroupNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const {
+void GroupNode::update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const {
 	RuntimeData data = ctx.input_runtime.read<RuntimeData>();
 	
 	if(data.from != data.to) {
@@ -358,8 +361,8 @@ void GroupNode::update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion
 		
 		m_children[data.from].node->update(ctx, root_motion);
 		LocalRigidTransform tmp;
-		m_children[data.to].node->update(ctx, Ref(tmp));
-		root_motion = root_motion->interpolate(tmp, data.t.seconds() / m_blend_length.seconds());
+		m_children[data.to].node->update(ctx, tmp);
+		root_motion = root_motion.interpolate(tmp, data.t.seconds() / m_blend_length.seconds());
 		return;
 	}
 
@@ -412,10 +415,14 @@ void GroupNode::enter(RuntimeContext& ctx) const {
 }
 
 void GroupNode::skip(RuntimeContext& ctx) const { 
-	ctx.input_runtime.skip(sizeof(RuntimeData));
+	RuntimeData data = ctx.input_runtime.read<RuntimeData>();
+	m_children[data.from].node->skip(ctx);
+	if (data.from != data.to) {
+		m_children[data.to].node->skip(ctx);
+	}
 }
 	
-void GroupNode::getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const {
+void GroupNode::getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const {
 	const RuntimeData data = ctx.input_runtime.read<RuntimeData>();
 
 	m_children[data.from].node->getPose(ctx, weight, pose, mask);
@@ -474,4 +481,4 @@ Node* Node::create(GroupNode* parent, Type type, IAllocator& allocator) {
 }
 
 
-} // ns Lumix::Anim
+} // namespace Lumix::anim

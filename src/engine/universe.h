@@ -3,19 +3,14 @@
 
 #include "engine/array.h"
 #include "engine/delegate_list.h"
-#include "engine/plugin.h"
 #include "engine/lumix.h"
 #include "engine/math.h"
-#include "engine/string.h"
 
 
-namespace Lumix
-{
-
+namespace Lumix {
 
 struct ComponentUID;
 struct IScene;
-
 
 struct LUMIX_ENGINE_API EntityMap {
 	EntityMap(IAllocator& allocator);
@@ -28,24 +23,14 @@ struct LUMIX_ENGINE_API EntityMap {
 };
 
 
-struct LUMIX_ENGINE_API Universe
-{
-public:
-	using Create = void (IScene::*)(EntityRef);
-	using Destroy = void (IScene::*)(EntityRef);
-	struct ComponentTypeEntry {
-		IScene* scene = nullptr;
-		void (IScene::*create)(EntityRef);
-		void (IScene::*destroy)(EntityRef);
-	};
-
+struct LUMIX_ENGINE_API Universe {
 	enum { ENTITY_NAME_MAX_LENGTH = 32 };
 
 	struct EntityData {
 		EntityData() {}
 
-		int hierarchy;
-		int name;
+		i32 hierarchy;
+		i32 name;
 
 		union {
 			u64 components;
@@ -57,8 +42,7 @@ public:
 		bool valid;
 	};
 
-public:
-	explicit Universe(IAllocator& allocator);
+	explicit Universe(struct Engine& engine, IAllocator& allocator);
 	~Universe();
 
 	IAllocator& getAllocator() { return m_allocator; }
@@ -75,14 +59,6 @@ public:
 	ComponentUID getComponent(EntityRef entity, ComponentType type) const;
 	ComponentUID getFirstComponent(EntityRef entity) const;
 	ComponentUID getNextComponent(const ComponentUID& cmp) const;
-	ComponentTypeEntry& registerComponentType(ComponentType type) { return m_component_type_map[type.index]; }
-	template <typename T1, typename T2>
-	void registerComponentType(ComponentType type, IScene* scene, T1 create, T2 destroy)
-	{
-		m_component_type_map[type.index].scene = scene;
-		m_component_type_map[type.index].create = static_cast<Create>(create);
-		m_component_type_map[type.index].destroy = static_cast<Destroy>(destroy);
-	}
 
 	bool isValid(EntityRef e) const { return m_entities[e.index].valid; }
 	EntityPtr getFirstEntity() const;
@@ -117,29 +93,28 @@ public:
 	float getScale(EntityRef entity) const;
 	const DVec3& getPosition(EntityRef entity) const;
 	const Quat& getRotation(EntityRef entity) const;
-	const char* getName() const { return m_name.c_str(); }
-	void setName(const char* name) { m_name = name; }
+	const char* getName() const { return m_name; }
+	void setName(const char* name);
 
+	DelegateList<void(EntityRef)>& entityCreated() { return m_entity_created; }
 	DelegateList<void(EntityRef)>& entityTransformed() { return m_entity_moved; }
 	DelegateList<void(EntityRef)>& entityDestroyed() { return m_entity_destroyed; }
 	DelegateList<void(const ComponentUID&)>& componentDestroyed() { return m_component_destroyed; }
 	DelegateList<void(const ComponentUID&)>& componentAdded() { return m_component_added; }
 
 	void serialize(struct OutputMemoryStream& serializer);
-	void deserialize(struct InputMemoryStream& serializer, Ref<EntityMap> entity_map);
+	void deserialize(struct InputMemoryStream& serializer, EntityMap& entity_map);
 
 	IScene* getScene(ComponentType type) const;
 	IScene* getScene(u32 hash) const;
-	Array<IScene*>& getScenes();
-	void addScene(IScene* scene);
-	void removeScene(IScene* scene);
+	Array<UniquePtr<IScene>>& getScenes();
+	void addScene(UniquePtr<IScene>&& scene);
 
 private:
 	void transformEntity(EntityRef entity, bool update_local);
 	void updateGlobalTransform(EntityRef entity);
 
-	struct Hierarchy
-	{
+	struct Hierarchy {
 		EntityRef entity;
 		EntityPtr parent;
 		EntityPtr first_child;
@@ -148,33 +123,36 @@ private:
 		Transform local_transform;
 	};
 
-	struct EntityName
-	{
+	struct EntityName {
 		EntityRef entity;
 		char name[ENTITY_NAME_MAX_LENGTH];
 	};
 
-private:
+	struct ComponentTypeEntry {
+		IScene* scene = nullptr;
+		void (*create)(IScene*, EntityRef);
+		void (*destroy)(IScene*, EntityRef);
+	};
+
 	IAllocator& m_allocator;
+	Engine& m_engine;
 	ComponentTypeEntry m_component_type_map[ComponentType::MAX_TYPES_COUNT];
-	Array<IScene*> m_scenes;
+	Array<UniquePtr<IScene>> m_scenes;
 	Array<Transform> m_transforms;
 	Array<EntityData> m_entities;
 	Array<Hierarchy> m_hierarchy;
 	Array<EntityName> m_names;
+	DelegateList<void(EntityRef)> m_entity_created;
 	DelegateList<void(EntityRef)> m_entity_moved;
 	DelegateList<void(EntityRef)> m_entity_destroyed;
 	DelegateList<void(const ComponentUID&)> m_component_destroyed;
 	DelegateList<void(const ComponentUID&)> m_component_added;
 	int m_first_free_slot;
-	String m_name;
+	char m_name[64];
 };
 
-
-struct LUMIX_ENGINE_API ComponentUID final
-{
-	ComponentUID()
-	{
+struct LUMIX_ENGINE_API ComponentUID final {
+	ComponentUID() {
 		scene = nullptr;
 		entity = INVALID_ENTITY;
 		type = {-1};
@@ -183,22 +161,16 @@ struct LUMIX_ENGINE_API ComponentUID final
 	ComponentUID(EntityPtr _entity, ComponentType _type, IScene* _scene)
 		: entity(_entity)
 		, type(_type)
-		, scene(_scene)
-	{
-	}
+		, scene(_scene) {}
 
-	EntityPtr entity; 
+	EntityPtr entity;
 	ComponentType type;
 	IScene* scene;
 
 	static const ComponentUID INVALID;
 
-	bool operator==(const ComponentUID& rhs) const
-	{
-		return type == rhs.type && scene == rhs.scene && entity == rhs.entity;
-	}
+	bool operator==(const ComponentUID& rhs) const { return type == rhs.type && scene == rhs.scene && entity == rhs.entity; }
 	bool isValid() const { return entity.isValid(); }
 };
-
 
 } // namespace Lumix

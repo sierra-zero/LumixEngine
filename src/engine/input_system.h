@@ -1,19 +1,15 @@
 #pragma once
 
-
 #include "engine/lumix.h"
 #include "engine/os.h"
 
+namespace Lumix {
 
-namespace Lumix
-{
+template <typename T> struct UniquePtr;
 
-struct LUMIX_ENGINE_API InputSystem
-{
-	struct Device
-	{
-		enum Type : u32
-		{
+struct LUMIX_ENGINE_API InputSystem {
+	struct Device {
+		enum Type : u32 {
 			MOUSE,
 			KEYBOARD,
 			CONTROLLER
@@ -27,18 +23,15 @@ struct LUMIX_ENGINE_API InputSystem
 		virtual const char* getName() const = 0;
 	};
 
-	struct ButtonEvent
-	{
+	struct ButtonEvent {
 		u32 key_id;
 		float x;
 		float y;
 		bool down;
 	};
 
-	struct AxisEvent
-	{
-		enum Axis
-		{
+	struct AxisEvent {
+		enum Axis {
 			LTRIGGER,
 			RTRIGGER,
 			LTHUMB,
@@ -52,15 +45,12 @@ struct LUMIX_ENGINE_API InputSystem
 		Axis axis;
 	};
 
-	struct TextEvent
-	{
+	struct TextEvent {
 		u32 utf8;
 	};
 
-	struct Event
-	{
-		enum Type : u32
-		{
+	struct Event {
+		enum Type : u32 {
 			BUTTON,
 			AXIS,
 			TEXT_INPUT,
@@ -70,23 +60,21 @@ struct LUMIX_ENGINE_API InputSystem
 
 		Type type;
 		Device* device;
-		union EventData
-		{
+		union EventData {
 			ButtonEvent button;
 			AxisEvent axis;
 			TextEvent text;
 		} data;
 	};
 
-	static InputSystem* create(struct Engine& engine);
-	static void destroy(InputSystem& system);
+	static UniquePtr<InputSystem> create(struct Engine& engine);
 
 	virtual ~InputSystem() {}
 	virtual struct IAllocator& getAllocator() = 0;
 	virtual void update(float dt) = 0;
 
 	virtual void injectEvent(const Event& event) = 0;
-	virtual void injectEvent(const OS::Event& event, int mouse_base_x, int mouse_base_y) = 0;
+	virtual void injectEvent(const os::Event& event, int mouse_base_x, int mouse_base_y) = 0;
 	virtual int getEventsCount() const = 0;
 	virtual const Event* getEvents() const = 0;
 
@@ -95,7 +83,5 @@ struct LUMIX_ENGINE_API InputSystem
 	virtual int getDevicesCount() const = 0;
 	virtual Device* getDevice(int index) = 0;
 };
-
-
 
 } // namespace Lumix

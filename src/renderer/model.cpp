@@ -1,27 +1,23 @@
 #include "engine/lumix.h"
-#include "renderer/model.h"
 
 #include "engine/array.h"
 #include "engine/crc32.h"
 #include "engine/crt.h"
 #include "engine/file_system.h"
 #include "engine/log.h"
-#include "engine/lua_wrapper.h"
+#include "engine/math.h"
 #include "engine/path.h"
 #include "engine/profiler.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
-#include "engine/math.h"
 #include "renderer/material.h"
+#include "renderer/model.h"
 #include "renderer/pose.h"
 #include "renderer/renderer.h"
 
 
 namespace Lumix
 {
-
-
-u32 Mesh::s_last_sort_key = 0;
 
 
 static LocalRigidTransform invert(const LocalRigidTransform& tr)
@@ -46,6 +42,7 @@ Mesh::Mesh(Material* mat,
 	, vertices(allocator)
 	, skin(allocator)
 	, vertex_decl(vertex_decl)
+	, renderer(renderer)
 {
 	render_data = LUMIX_NEW(renderer.getAllocator(), RenderData);
 	render_data->vb_stride = vb_stride;
@@ -61,10 +58,32 @@ Mesh::Mesh(Material* mat,
 		}
 	}
 
-	sort_key = s_last_sort_key;
-	++s_last_sort_key;
+	sort_key = renderer.allocSortKey(this);
 }
 
+Mesh::Mesh(Mesh&& rhs)
+	: type(rhs.type)
+	, indices(rhs.indices)
+	, vertices(rhs.vertices.move())
+	, skin(rhs.skin.move())
+	, flags(rhs.flags)
+	, sort_key(rhs.sort_key)
+	, layer(rhs.layer)
+	, name(rhs.name)
+	, material(rhs.material)
+	, vertex_decl(rhs.vertex_decl)
+	, render_data(rhs.render_data)
+	, lod(rhs.lod)
+	, renderer(rhs.renderer)
+{
+	memmove(attributes_semantic, rhs.attributes_semantic, sizeof(attributes_semantic));
+	rhs.sort_key = 0;
+	ASSERT(false); // renderer keeps Mesh* pointer, so we should not move
+}
+
+Mesh::~Mesh() {
+	renderer.freeSortKey(sort_key);
+}
 
 static bool hasAttribute(Mesh& mesh, Mesh::AttributeSemantic attribute)
 {
@@ -77,7 +96,7 @@ static bool hasAttribute(Mesh& mesh, Mesh::AttributeSemantic attribute)
 
 void Mesh::setMaterial(Material* new_material, Model& model, Renderer& renderer)
 {
-	if (material) material->getResourceManager().unload(*material);
+	if (material) material->decRefCount();
 	material = new_material;
 	type = model.getBoneCount() == 0 || skin.empty() ? Mesh::RIGID : Mesh::SKINNED;
 }
@@ -88,7 +107,6 @@ const ResourceType Model::TYPE("model");
 
 Model::Model(const Path& path, ResourceManager& resource_manager, Renderer& renderer, IAllocator& allocator)
 	: Resource(path, resource_manager, allocator)
-	, m_bounding_radius()
 	, m_allocator(allocator)
 	, m_bone_map(m_allocator)
 	, m_meshes(m_allocator)
@@ -96,14 +114,8 @@ Model::Model(const Path& path, ResourceManager& resource_manager, Renderer& rend
 	, m_first_nonroot_bone_index(0)
 	, m_renderer(renderer)
 {
-	m_lod_indices[0] = { 0, -1 };
-	m_lod_indices[1] = { 0, -1 };
-	m_lod_indices[2] = { 0, -1 };
-	m_lod_indices[3] = { 0, -1 };
-	m_lod_distances[0] = FLT_MAX;
-	m_lod_distances[1] = FLT_MAX;
-	m_lod_distances[2] = FLT_MAX;
-	m_lod_distances[3] = FLT_MAX;
+	for (LODMeshIndices& i : m_lod_indices) i = {0, -1};
+	for (float & i : m_lod_distances) i = FLT_MAX;
 }
 
 
@@ -199,27 +211,27 @@ RayCastModelHit Model::castRay(const Vec3& origin, const Vec3& dir, const Pose* 
 			}
 
 
-			Vec3 normal = crossProduct(p1 - p0, p2 - p0);
-			float q = dotProduct(normal, dir);
+			Vec3 normal = cross(p1 - p0, p2 - p0);
+			float q = dot(normal, dir);
 			if (q == 0)	continue;
 
-			float d = -dotProduct(normal, p0);
-			float t = -(dotProduct(normal, origin) + d) / q;
+			float d = -dot(normal, p0);
+			float t = -(dot(normal, origin) + d) / q;
 			if (t < 0) continue;
 
 			Vec3 hit_point = origin + dir * t;
 
 			Vec3 edge0 = p1 - p0;
 			Vec3 VP0 = hit_point - p0;
-			if (dotProduct(normal, crossProduct(edge0, VP0)) < 0) continue;
+			if (dot(normal, cross(edge0, VP0)) < 0) continue;
 
 			Vec3 edge1 = p2 - p1;
 			Vec3 VP1 = hit_point - p1;
-			if (dotProduct(normal, crossProduct(edge1, VP1)) < 0) continue;
+			if (dot(normal, cross(edge1, VP1)) < 0) continue;
 
 			Vec3 edge2 = p0 - p2;
 			Vec3 VP2 = hit_point - p2;
-			if (dotProduct(normal, crossProduct(edge2, VP2)) < 0) continue;
+			if (dot(normal, cross(edge2, VP2)) < 0) continue;
 
 			if (!hit.is_hit || hit.t > t)
 			{
@@ -271,14 +283,14 @@ static u8 getIndexBySemantic(Mesh::AttributeSemantic semantic) {
 		case Mesh::AttributeSemantic::TANGENT: return 3;
 		case Mesh::AttributeSemantic::INDICES: return 4;
 		case Mesh::AttributeSemantic::WEIGHTS: return 5;
-		case Mesh::AttributeSemantic::COLOR0: return 6;
+		case Mesh::AttributeSemantic::COLOR0: return 7;
 	}
 	ASSERT(false);
 	return 0;
 }
 
 
-static bool parseVertexDecl(IInputStream& file, gpu::VertexDecl* vertex_decl, Mesh::AttributeSemantic* semantics, Ref<u32> vb_stride)
+static bool parseVertexDecl(IInputStream& file, gpu::VertexDecl* vertex_decl, Mesh::AttributeSemantic* semantics, u32& vb_stride)
 {
 	u32 attribute_count;
 	file.read(&attribute_count, sizeof(attribute_count));
@@ -327,8 +339,7 @@ static bool parseVertexDecl(IInputStream& file, gpu::VertexDecl* vertex_decl, Me
 	if (!is_skinned) {
 		vertex_decl->addAttribute(4, 0, 4, gpu::AttributeType::FLOAT, gpu::Attribute::INSTANCED);
 		vertex_decl->addAttribute(5, 16, 4, gpu::AttributeType::FLOAT, gpu::Attribute::INSTANCED);
-		// TODO this is here because of grass, find a better solution
-		//vertex_decl->addAttribute(6, 32, 4, gpu::AttributeType::FLOAT, gpu::Attribute::INSTANCED);
+		vertex_decl->addAttribute(6, 32, 1, gpu::AttributeType::FLOAT, gpu::Attribute::INSTANCED);
 	}
 
 	return true;
@@ -341,6 +352,12 @@ void Model::onBeforeReady()
 		mesh.type = getBoneCount() == 0 || mesh.skin.empty() ? Mesh::RIGID : Mesh::SKINNED;
 		mesh.layer = mesh.material->getLayer();
 	}
+
+	for (u32 i = 0; i < 4; ++i) {
+		for (i32 j = m_lod_indices[i].from; j <= m_lod_indices[i].to; ++j) {
+			m_meshes[j].lod = float(i);
+		}
+	}
 }
 
 
@@ -350,7 +367,7 @@ bool Model::parseBones(InputMemoryStream& file)
 	file.read(bone_count);
 	if (bone_count < 0) return false;
 	if (bone_count > Bone::MAX_COUNT) {
-		logWarning("Renderer") << "Model " << getPath().c_str() << " has too many bones.";
+		logWarning("Model ", getPath().c_str(), " has too many bones.");
 		return false;
 	}
 
@@ -359,8 +376,8 @@ bool Model::parseBones(InputMemoryStream& file)
 		Model::Bone& b = m_bones.emplace(m_allocator);
 		int len;
 		file.read(len);
-		char tmp[MAX_PATH_LENGTH];
-		if (len >= MAX_PATH_LENGTH) {
+		char tmp[LUMIX_MAX_PATH];
+		if (len >= LUMIX_MAX_PATH) {
 			return false;
 		}
 		file.read(tmp, len);
@@ -377,14 +394,14 @@ bool Model::parseBones(InputMemoryStream& file)
 		Model::Bone& b = m_bones[i];
 		if (b.parent_idx < 0) {
 			if (m_first_nonroot_bone_index != -1) {
-				logError("Renderer") << "Invalid skeleton in " << getPath().c_str();
+				logError("Invalid skeleton in ", getPath());
 				return false;
 			}
 			b.parent_idx = -1;
 		}
 		else {
 			if (b.parent_idx > i) {
-				logError("Renderer") << "Invalid skeleton in " << getPath().c_str();
+				logError("Invalid skeleton in ", getPath());
 				return false;
 			}
 			if (m_first_nonroot_bone_index == -1) m_first_nonroot_bone_index = i;
@@ -441,8 +458,8 @@ bool Model::parseMeshes(InputMemoryStream& file, FileVersion version)
 	file.read(object_count);
 	if (object_count <= 0) return false;
 
-	char model_dir[MAX_PATH_LENGTH];
-	Path::getDir(Span(model_dir), getPath().c_str());
+	char model_dir[LUMIX_MAX_PATH];
+	copyString(Span(model_dir), Path::getDir(getPath().c_str()));
 
 	m_meshes.reserve(object_count);
 	for (int i = 0; i < object_count; ++i)
@@ -451,10 +468,10 @@ bool Model::parseMeshes(InputMemoryStream& file, FileVersion version)
 		Mesh::AttributeSemantic semantics[gpu::VertexDecl::MAX_ATTRIBUTES];
 		for(auto& i : semantics) i = Mesh::AttributeSemantic::NONE;
 		u32 vb_stride;
-		if (!parseVertexDecl(file, &vertex_decl, semantics, Ref(vb_stride))) return false;
+		if (!parseVertexDecl(file, &vertex_decl, semantics, vb_stride)) return false;
 
 		u32 mat_path_length;
-		char mat_path[MAX_PATH_LENGTH + 128];
+		char mat_path[LUMIX_MAX_PATH + 128];
 		file.read(mat_path_length);
 		if (mat_path_length + 1 > lengthOf(mat_path)) return false;
 		file.read(mat_path, mat_path_length);
@@ -464,7 +481,7 @@ bool Model::parseMeshes(InputMemoryStream& file, FileVersion version)
 	
 		i32 str_size;
 		file.read(str_size);
-		char mesh_name[MAX_PATH_LENGTH];
+		char mesh_name[LUMIX_MAX_PATH];
 		mesh_name[str_size] = 0;
 		file.read(mesh_name, str_size);
 
@@ -487,9 +504,9 @@ bool Model::parseMeshes(InputMemoryStream& file, FileVersion version)
 
 		if (index_size == 2) mesh.flags.set(Mesh::Flags::INDICES_16_BIT);
 		const Renderer::MemRef mem = m_renderer.copy(mesh.indices.data(), (u32)mesh.indices.size());
-		mesh.render_data->index_buffer_handle = m_renderer.createBuffer(mem, (u32)gpu::BufferFlags::IMMUTABLE);
+		mesh.render_data->index_buffer_handle = m_renderer.createBuffer(mem, gpu::BufferFlags::IMMUTABLE);
 		mesh.render_data->index_type = index_size == 2 ? gpu::DataType::U16 : gpu::DataType::U32;
-		if (!mesh.render_data->index_buffer_handle.isValid()) return false;
+		if (!mesh.render_data->index_buffer_handle) return false;
 	}
 
 	for (int i = 0; i < object_count; ++i)
@@ -522,10 +539,11 @@ bool Model::parseMeshes(InputMemoryStream& file, FileVersion version)
 			}
 			mesh.vertices[j] = *(const Vec3*)&vertices[offset + position_attribute_offset];
 		}
-		mesh.render_data->vertex_buffer_handle = m_renderer.createBuffer(vertices_mem, (u32)gpu::BufferFlags::IMMUTABLE);
-		if (!mesh.render_data->vertex_buffer_handle.isValid()) return false;
+		mesh.render_data->vertex_buffer_handle = m_renderer.createBuffer(vertices_mem, gpu::BufferFlags::IMMUTABLE);
+		if (!mesh.render_data->vertex_buffer_handle) return false;
 	}
-	file.read(m_bounding_radius);
+	file.read(m_origin_bounding_radius);
+	file.read(m_center_bounding_radius);
 	file.read(m_aabb);
 
 	return true;
@@ -559,13 +577,13 @@ bool Model::load(u64 size, const u8* mem)
 
 	if (header.magic != FILE_MAGIC)
 	{
-		logWarning("Renderer") << "Corrupted model " << getPath().c_str();
+		logWarning("Corrupted model ", getPath());
 		return false;
 	}
 
 	if(header.version > (u32)FileVersion::LATEST)
 	{
-		logWarning("Renderer") << "Unsupported version of model " << getPath().c_str();
+		logWarning("Unsupported version of model ", getPath());
 		return false;
 	}
 
@@ -577,52 +595,8 @@ bool Model::load(u64 size, const u8* mem)
 		return true;
 	}
 
-	logError("Renderer") << "Error loading model " << getPath().c_str();
+	logError("Error loading model ", getPath());
 	return false;
-}
-
-
-static Vec3 getBonePosition(Model* model, int bone_index)
-{
-	return model->getBone(bone_index).transform.pos;
-}
-
-
-static int getBoneParent(Model* model, int bone_index)
-{
-	return model->getBone(bone_index).parent_idx;
-}
-
-static const char* getBoneName(Model* model, int bone_index)
-{
-	return model->getBone(bone_index).name.c_str();
-}
-
-
-void Model::registerLuaAPI(lua_State* L)
-{
-	#define REGISTER_FUNCTION(F)\
-		do { \
-			auto f = &LuaWrapper::wrapMethod<&Model::F>; \
-			LuaWrapper::createSystemFunction(L, "Model", #F, f); \
-		} while(false) \
-
-	REGISTER_FUNCTION(getBoneCount);
-
-	#undef REGISTER_FUNCTION
-	
-
-	#define REGISTER_FUNCTION(F)\
-		do { \
-			auto f = &LuaWrapper::wrap<&F>; \
-			LuaWrapper::createSystemFunction(L, "Model", #F, f); \
-		} while(false) \
-
-	REGISTER_FUNCTION(getBonePosition);
-	REGISTER_FUNCTION(getBoneParent);
-	REGISTER_FUNCTION(getBoneName);
-
-	#undef REGISTER_FUNCTION
 }
 
 
@@ -631,14 +605,14 @@ void Model::unload()
 	auto* material_manager = m_resource_manager.getOwner().get(Material::TYPE);
 	for (int i = 0; i < m_meshes.size(); ++i) {
 		removeDependency(*m_meshes[i].material);
-		material_manager->unload(*m_meshes[i].material);
+		m_meshes[i].material->decRefCount();
 	}
 
 	for (Mesh& mesh : m_meshes) {
 		m_renderer.runInRenderThread(mesh.render_data, [](Renderer& renderer, void* ptr){
 			Mesh::RenderData* rd = (Mesh::RenderData*)ptr;
-			if (rd->index_buffer_handle.isValid()) gpu::destroy(rd->index_buffer_handle);
-			if (rd->vertex_buffer_handle.isValid()) gpu::destroy(rd->vertex_buffer_handle);
+			if (rd->index_buffer_handle) gpu::destroy(rd->index_buffer_handle);
+			if (rd->vertex_buffer_handle) gpu::destroy(rd->vertex_buffer_handle);
 			LUMIX_DELETE(renderer.getAllocator(), rd); 
 		});
 	}

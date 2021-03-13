@@ -1,10 +1,12 @@
 #include "universe.h"
 #include "engine/crc32.h"
-#include "engine/plugin.h"
+#include "engine/engine.h"
 #include "engine/log.h"
 #include "engine/math.h"
+#include "engine/plugin.h"
 #include "engine/prefab.h"
 #include "engine/reflection.h"
+#include "engine/string.h"
 
 
 namespace Lumix
@@ -41,59 +43,64 @@ void EntityMap::set(EntityRef src, EntityRef dst) {
 Universe::~Universe() = default;
 
 
-Universe::Universe(IAllocator& allocator)
+Universe::Universe(Engine& engine, IAllocator& allocator)
 	: m_allocator(allocator)
+	, m_engine(engine)
 	, m_names(m_allocator)
 	, m_entities(m_allocator)
 	, m_component_added(m_allocator)
 	, m_component_destroyed(m_allocator)
 	, m_entity_destroyed(m_allocator)
 	, m_entity_moved(m_allocator)
+	, m_entity_created(m_allocator)
 	, m_first_free_slot(-1)
 	, m_scenes(m_allocator)
 	, m_hierarchy(m_allocator)
 	, m_transforms(m_allocator)
-	, m_name(m_allocator)
+	, m_name("")
 {
 	m_entities.reserve(RESERVED_ENTITIES_COUNT);
 	m_transforms.reserve(RESERVED_ENTITIES_COUNT);
+	memset(m_component_type_map, 0, sizeof(m_component_type_map));
 }
 
 
-IScene* Universe::getScene(ComponentType type) const
-{
+IScene* Universe::getScene(ComponentType type) const {
 	return m_component_type_map[type.index].scene;
 }
 
 
 IScene* Universe::getScene(u32 hash) const
 {
-	for (auto* scene : m_scenes)
+	for (auto& scene : m_scenes)
 	{
 		if (crc32(scene->getPlugin().getName()) == hash)
 		{
-			return scene;
+			return scene.get();
 		}
 	}
 	return nullptr;
 }
 
 
-Array<IScene*>& Universe::getScenes()
+Array<UniquePtr<IScene>>& Universe::getScenes()
 {
 	return m_scenes;
 }
 
 
-void Universe::addScene(IScene* scene)
+void Universe::addScene(UniquePtr<IScene>&& scene)
 {
-	m_scenes.push(scene);
-}
+	const u32 hash = crc32(scene->getPlugin().getName());
+	for (const reflection::RegisteredComponent& cmp : reflection::getComponents()) {
+		if (cmp.scene == hash) {
+			m_component_type_map[cmp.cmp->component_type.index].scene = scene.get();
+			m_component_type_map[cmp.cmp->component_type.index].create = cmp.cmp->creator;
+			m_component_type_map[cmp.cmp->component_type.index].destroy = cmp.cmp->destroyer;
+		}
+	}
 
-
-void Universe::removeScene(IScene* scene)
-{
-	m_scenes.swapAndPopItem(scene);
+	m_scenes.push(scene.move());
 }
 
 
@@ -222,7 +229,7 @@ Matrix Universe::getRelativeMatrix(EntityRef entity, const DVec3& base_pos) cons
 {
 	const Transform& transform = m_transforms[entity.index];
 	Matrix mtx = transform.rot.toMatrix();
-	mtx.setTranslation((transform.pos - base_pos).toFloat());
+	mtx.setTranslation(Vec3(transform.pos - base_pos));
 	mtx.multiply3x3(transform.scale);
 	return mtx;
 }
@@ -331,6 +338,8 @@ void Universe::emplaceEntity(EntityRef entity)
 	data.hierarchy = -1;
 	data.components = 0;
 	data.valid = true;
+
+	m_entity_created.invoke(entity);
 }
 
 
@@ -360,6 +369,7 @@ EntityRef Universe::createEntity(const DVec3& position, const Quat& rotation)
 	data->hierarchy = -1;
 	data->components = 0;
 	data->valid = true;
+	m_entity_created.invoke(entity);
 
 	return entity;
 }
@@ -384,7 +394,7 @@ void Universe::destroyEntity(EntityRef entity)
 			auto original_mask = mask;
 			IScene* scene = m_component_type_map[i].scene;
 			auto destroy_method = m_component_type_map[i].destroy;
-			(scene->*destroy_method)(entity);
+			destroy_method(scene, entity);
 			mask = entity_data.components;
 			ASSERT(original_mask != mask);
 		}
@@ -416,7 +426,7 @@ EntityPtr Universe::getFirstEntity() const
 {
 	for (int i = 0; i < m_entities.size(); ++i)
 	{
-		if (m_entities[i].valid) return {i};
+		if (m_entities[i].valid) return EntityPtr{i};
 	}
 	return INVALID_ENTITY;
 }
@@ -426,7 +436,7 @@ EntityPtr Universe::getNextEntity(EntityRef entity) const
 {
 	for (int i = entity.index + 1; i < m_entities.size(); ++i)
 	{
-		if (m_entities[i].valid) return {i};
+		if (m_entities[i].valid) return EntityPtr{i};
 	}
 	return INVALID_ENTITY;
 }
@@ -473,7 +483,7 @@ void Universe::setParent(EntityPtr new_parent, EntityRef child)
 	bool would_create_cycle = new_parent.isValid() && isDescendant(child, (EntityRef)new_parent);
 	if (would_create_cycle)
 	{
-		logError("Engine") << "Hierarchy can not contains a cycle.";
+		logError("Hierarchy can not contains a cycle.");
 		return;
 	}
 
@@ -659,17 +669,20 @@ void Universe::serialize(OutputMemoryStream& serializer)
 	if (!m_hierarchy.empty()) serializer.write(&m_hierarchy[0], m_hierarchy.byte_size());
 }
 
+void Universe::setName(const char* name) { 
+	copyString(m_name, name);
+}
 
-void Universe::deserialize(InputMemoryStream& serializer, Ref<EntityMap> entity_map)
+void Universe::deserialize(InputMemoryStream& serializer, EntityMap& entity_map)
 {
 	u32 to_reserve;
 	serializer.read(to_reserve);
-	entity_map->reserve(to_reserve);
+	entity_map.reserve(to_reserve);
 
 	for (EntityPtr e = serializer.read<EntityPtr>(); e.isValid(); e = serializer.read<EntityPtr>()) {
 		EntityRef orig = (EntityRef)e;
 		const EntityRef new_e = createEntity({0, 0, 0}, {0, 0, 0, 1});
-		entity_map->set(orig, new_e);
+		entity_map.set(orig, new_e);
 		serializer.read(m_transforms[new_e.index]);
 	}
 
@@ -678,7 +691,7 @@ void Universe::deserialize(InputMemoryStream& serializer, Ref<EntityMap> entity_
 	for (u32 i = 0; i < count; ++i) {
 		EntityName& name = m_names.emplace();
 		serializer.read(name.entity);
-		name.entity = entity_map->get(name.entity);
+		name.entity = entity_map.get(name.entity);
 		copyString(name.name, serializer.readString());
 		m_entities[name.entity.index].name = m_names.size() - 1;
 	}
@@ -690,10 +703,10 @@ void Universe::deserialize(InputMemoryStream& serializer, Ref<EntityMap> entity_
 		serializer.read(&m_hierarchy[old_count], sizeof(m_hierarchy[0]) * count);
 
 		for (u32 i = old_count; i < count + old_count; ++i) {
-			m_hierarchy[i].entity = entity_map->get(m_hierarchy[i].entity);
-			m_hierarchy[i].first_child = entity_map->get(m_hierarchy[i].first_child);
-			m_hierarchy[i].next_sibling = entity_map->get(m_hierarchy[i].next_sibling);
-			m_hierarchy[i].parent = entity_map->get(m_hierarchy[i].parent);
+			m_hierarchy[i].entity = entity_map.get(m_hierarchy[i].entity);
+			m_hierarchy[i].first_child = entity_map.get(m_hierarchy[i].first_child);
+			m_hierarchy[i].next_sibling = entity_map.get(m_hierarchy[i].next_sibling);
+			m_hierarchy[i].parent = entity_map.get(m_hierarchy[i].parent);
 			m_entities[m_hierarchy[i].entity.index].hierarchy = i;
 		}
 	}
@@ -780,7 +793,7 @@ void Universe::createComponent(ComponentType type, EntityRef entity)
 {
 	IScene* scene = m_component_type_map[type.index].scene;
 	auto& create_method = m_component_type_map[type.index].create;
-	(scene->*create_method)(entity);
+	create_method(scene, entity);
 }
 
 
@@ -788,7 +801,7 @@ void Universe::destroyComponent(EntityRef entity, ComponentType type)
 {
 	IScene* scene = m_component_type_map[type.index].scene;
 	auto& destroy_method = m_component_type_map[type.index].destroy;
-	(scene->*destroy_method)(entity);
+	destroy_method(scene, entity);
 }
 
 

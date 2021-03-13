@@ -8,6 +8,7 @@ namespace Lumix
 {
 
 template <typename T> struct Array;
+template <typename T> struct UniquePtr;
 
 struct EditorIcons
 {
@@ -22,13 +23,14 @@ struct EditorIcons
 		struct Model* model;
 	};
 
-	static EditorIcons* create(struct WorldEditor& editor, struct RenderScene& scene);
+	static UniquePtr<EditorIcons> create(struct WorldEditor& editor, struct RenderScene& scene);
 	static void destroy(EditorIcons& icons);
 
 	virtual ~EditorIcons() {}
 
 	virtual void getRenderData(Array<RenderData>* data) = 0;
 	virtual Hit raycast(const DVec3& origin, const Vec3& dir) = 0;
+	virtual void refresh() = 0;
 };
 
 

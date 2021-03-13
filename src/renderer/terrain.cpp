@@ -6,13 +6,11 @@
 #include "engine/log.h"
 #include "engine/math.h"
 #include "engine/profiler.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
-#include "renderer/shader.h"
 #include "renderer/texture.h"
 #include "engine/universe.h"
 
@@ -23,7 +21,7 @@ namespace Lumix
 
 static const float GRASS_QUAD_SIZE = 10.0f;
 static const float GRASS_QUAD_RADIUS = GRASS_QUAD_SIZE * 0.7072f;
-static const ComponentType TERRAIN_HASH = Reflection::getComponentType("terrain");
+static const ComponentType TERRAIN_HASH = reflection::getComponentType("terrain");
 
 struct Sample
 {
@@ -53,7 +51,7 @@ Terrain::GrassType::~GrassType()
 {
 	if (m_grass_model)
 	{
-		m_grass_model->getResourceManager().unload(*m_grass_model);
+		m_grass_model->decRefCount();
 	}
 }
 
@@ -67,7 +65,7 @@ Terrain::GrassType::GrassType(Terrain& terrain)
 	: m_terrain(terrain)
 {
 	m_grass_model = nullptr;
-	m_density = 10;
+	m_spacing = 1.f;
 	m_distance = 50;
 }
 
@@ -94,10 +92,10 @@ void Terrain::removeGrassType(int index)
 }
 
 
-void Terrain::setGrassTypeDensity(int index, int density)
+void Terrain::setGrassTypeSpacing(int index, float spacing)
 {
 	GrassType& type = m_grass_types[index];
-	type.m_density = clamp(density, 0, 100);
+	type.m_spacing = spacing;
 }
 
 
@@ -114,10 +112,10 @@ void Terrain::setGrassTypeRotationMode(int index, Terrain::GrassType::RotationMo
 }
 
 
-int Terrain::getGrassTypeDensity(int index) const
+float Terrain::getGrassTypeSpacing(int index) const
 {
 	const GrassType& type = m_grass_types[index];
-	return type.m_density;
+	return type.m_spacing;
 }
 
 
@@ -168,10 +166,10 @@ void Terrain::setGrassTypePath(int index, const Path& path)
 	GrassType& type = m_grass_types[index];
 	if (type.m_grass_model)
 	{
-		type.m_grass_model->getResourceManager().unload(*type.m_grass_model);
+		type.m_grass_model->decRefCount();
 		type.m_grass_model = nullptr;
 	}
-	if (path.isValid())
+	if (!path.isEmpty())
 	{
 		type.m_grass_model = m_scene.getEngine().getResourceManager().load<Model>(path);
 	}
@@ -182,7 +180,7 @@ void Terrain::setMaterial(Material* material)
 {
 	if (material != m_material) {
 		if (m_material) {
-			m_material->getResourceManager().unload(*m_material);
+			m_material->decRefCount();
 			m_material->getObserverCb().unbind<&Terrain::onMaterialLoaded>(this);
 		}
 		m_material = material;
@@ -191,7 +189,7 @@ void Terrain::setMaterial(Material* material)
 		}
 	}
 	else if(material) {
-		material->getResourceManager().unload(*material);
+		material->decRefCount();
 	}
 }
 
@@ -218,7 +216,8 @@ void Terrain::deserialize(EntityRef entity, InputMemoryStream& serializer, Unive
 	for(int i = 0; i < count; ++i)
 	{
 		const char* path = serializer.readString();
-		serializer.read(m_grass_types[i].m_density);
+		serializer.read(m_grass_types[i].m_spacing);
+		m_grass_types[i].m_spacing = clamp(m_grass_types[i].m_spacing, 0.1f, 9000.f);
 		serializer.read(m_grass_types[i].m_distance);
 		serializer.read(m_grass_types[i].m_rotation_mode);
 		setGrassTypePath(i, Path(path));
@@ -238,7 +237,7 @@ void Terrain::serialize(OutputMemoryStream& serializer)
 	{
 		GrassType& type = m_grass_types[i];
 		serializer.writeString(type.m_grass_model ? type.m_grass_model->getPath().c_str() : "");
-		serializer.write(type.m_density);
+		serializer.write(type.m_spacing);
 		serializer.write(type.m_distance);
 		serializer.write(type.m_rotation_mode);
 	}
@@ -269,14 +268,14 @@ Vec3 Terrain::getNormal(float x, float z)
 		float h0 = getHeight(int_x, int_z);
 		float h1 = getHeight(int_x + 1, int_z);
 		float h2 = getHeight(int_x + 1, int_z + 1);
-		return crossProduct(Vec3(m_scale.x, h2 - h0, m_scale.x), Vec3(m_scale.x, h1 - h0, 0)).normalized();
+		return normalize(cross(Vec3(m_scale.x, h2 - h0, m_scale.x), Vec3(m_scale.x, h1 - h0, 0)));
 	}
 	else
 	{
 		float h0 = getHeight(int_x, int_z);
 		float h1 = getHeight(int_x + 1, int_z + 1);
 		float h2 = getHeight(int_x, int_z + 1);
-		return crossProduct(Vec3(0, h2 - h0, m_scale.x), Vec3(m_scale.x, h1 - h0, m_scale.x)).normalized();
+		return normalize(cross(Vec3(0, h2 - h0, m_scale.x), Vec3(m_scale.x, h1 - h0, m_scale.x)));
 	}
 }
 
@@ -312,12 +311,19 @@ float Terrain::getHeight(float x, float z) const
 float Terrain::getHeight(int x, int z) const
 {
 	const float DIV64K = 1.0f / 65535.0f;
+	const float DIV255 = 1.0f / 255.0f;
 	if (!m_heightmap) return 0;
 
 	Texture* t = m_heightmap;
-	ASSERT(t->format == gpu::TextureFormat::R16);
-	int idx = clamp(x, 0, m_width) + clamp(z, 0, m_height) * m_width;
-	return m_scale.y * DIV64K * ((u16*)t->getData())[idx];
+	int idx = clamp(x, 0, m_width - 1) + clamp(z, 0, m_height - 1) * m_width;
+	if (t->format == gpu::TextureFormat::R16) {
+		return m_scale.y * DIV64K * ((u16*)t->getData())[idx];
+	}
+	if (t->format == gpu::TextureFormat::RGBA8) {
+		return m_scale.y * DIV255 * (((u32*)t->getData())[idx] & 0xff);
+	}
+	ASSERT(false);
+	return 0;
 }
 
 
@@ -355,7 +361,7 @@ RayCastModelHit Terrain::castRay(const DVec3& origin, const Vec3& dir)
 	const Quat rot = universe.getRotation(m_entity);
 	const DVec3 pos = universe.getPosition(m_entity);
 	const Vec3 rel_dir = rot.rotate(dir);
-	const Vec3 terrain_to_ray = (origin - pos).toFloat();
+	const Vec3 terrain_to_ray = Vec3(origin - pos);
 	const Vec3 rel_origin = rot.conjugated().rotate(terrain_to_ray);
 
 	Vec3 start;

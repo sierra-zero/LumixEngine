@@ -1,6 +1,7 @@
 #include <imgui/imgui.h>
 
 #include "profiler_ui.h"
+#include "engine/allocators.h"
 #include "engine/crt.h"
 #include "engine/debug.h"
 #include "engine/engine.h"
@@ -14,7 +15,7 @@
 #include "engine/profiler.h"
 #include "engine/resource.h"
 #include "engine/resource_manager.h"
-#include "utils.h"
+#include "engine/string.h"
 
 
 namespace Lumix
@@ -40,6 +41,41 @@ enum MemoryColumn
 	SIZE
 };
 
+struct ThreadRecord
+{
+	float y;
+	u32 thread_id;
+	const char* name;
+	bool show;
+	struct {
+		u64 time;
+		bool is_enter;
+	} last_context_switch;
+};
+
+struct ThreadContextProxy {
+	ThreadContextProxy(u8* ptr) 
+	{
+		InputMemoryStream blob(ptr, 9000);
+		name = blob.readString();
+		blob.read(thread_id);
+		blob.read(begin);
+		blob.read(end);
+		default_show = blob.read<u8>();
+		blob.read(buffer_size);
+		buffer = (u8*)blob.getData() + blob.getPosition();
+	}
+
+	u8* next() { return buffer + buffer_size; }
+
+	const char* name;
+	u32 thread_id;
+	u32 begin;
+	u32 end;
+	u32 buffer_size;
+	bool default_show;
+	u8* buffer;
+};
 
 static const char* getContexSwitchReasonString(i8 reason)
 {
@@ -87,11 +123,54 @@ static const char* getContexSwitchReasonString(i8 reason)
 	return reasons[reason];
 }
 
+template <typename T>
+static void read(const ThreadContextProxy& ctx, u32 p, T& value)
+{
+	const u8* buf = ctx.buffer;
+	const u32 buf_size = ctx.buffer_size;
+	const u32 l = p % buf_size;
+	if (l + sizeof(value) <= buf_size) {
+		memcpy(&value, buf + l, sizeof(value));
+		return;
+	}
+
+	memcpy(&value, buf + l, buf_size - l);
+	memcpy((u8*)&value + (buf_size - l), buf, sizeof(value) - (buf_size - l));
+}
+
+static void read(const ThreadContextProxy& ctx, u32 p, u8* ptr, int size)
+{
+	const u8* buf = ctx.buffer;
+	const u32 buf_size = ctx.buffer_size;
+	const u32 l = p % buf_size;
+	if (l + size <= buf_size) {
+		memcpy(ptr, buf + l, size);
+		return;
+	}
+
+	memcpy(ptr, buf + l, buf_size - l);
+	memcpy(ptr + (buf_size - l), buf, size - (buf_size - l));
+}
+
+template <typename T>
+static void overwrite(ThreadContextProxy& ctx, u32 p, const T& v) {
+	p = p % ctx.buffer_size;
+	if (ctx.buffer_size - p >= sizeof(v)) {
+		memcpy(ctx.buffer + p, &v, sizeof(v));
+	}
+	else {
+		const u32 prefix_len = ctx.buffer_size - p;
+		memcpy(ctx.buffer + p, &v, prefix_len);
+		memcpy(ctx.buffer, ((u8*)&v) + prefix_len, sizeof(v) - prefix_len);
+	}
+}
 
 struct ProfilerUIImpl final : ProfilerUI
 {
-	ProfilerUIImpl(Debug::Allocator* allocator, Engine& engine)
+	ProfilerUIImpl(debug::Allocator* allocator, Engine& engine)
 		: m_main_allocator(allocator)
+		, m_threads(m_allocator)
+		, m_data(m_allocator)
 		, m_resource_manager(engine.getResourceManager())
 		, m_engine(engine)
 	{
@@ -105,7 +184,6 @@ struct ProfilerUIImpl final : ProfilerUI
 		m_resource_filter[0] = 0;
 	}
 
-
 	~ProfilerUIImpl()
 	{
 		while (m_engine.getFileSystem().hasWork())
@@ -117,6 +195,138 @@ struct ProfilerUIImpl final : ProfilerUI
 		LUMIX_DELETE(m_allocator, m_allocation_root);
 	}
 
+	void onPause() {
+		ASSERT(m_is_paused);
+		m_data.clear();
+		profiler::serialize(m_data);
+		patchStrings();
+		findEnd();
+	}
+
+	void findEnd() {
+		m_end = 0;
+		forEachThread([&](ThreadContextProxy& ctx){
+			u32 p = ctx.begin;
+			const u32 end = ctx.end;
+			while (p != end) {
+				profiler::EventHeader header;
+				read(ctx, p, header);
+				m_end = maximum(header.time, m_end);
+				p += header.size;
+			}
+		});
+	}
+
+	void patchStrings() {
+		InputMemoryStream tmp(m_data);
+		tmp.read<u32>();
+		const u32 count = tmp.read<u32>();
+		u8* iter = (u8*)tmp.skip(0);
+		ThreadContextProxy global(iter);
+		iter = global.next();
+		for (u32 i = 0; i < count; ++i) {
+			ThreadContextProxy ctx(iter);
+			iter = ctx.next();
+		}
+
+		HashMap<const void*, const char*> map(m_allocator);
+		map.reserve(512);
+		tmp.setPosition(iter - m_data.data());
+		u32 str_count = tmp.read<u32>();
+		for (u32 i = 0; i < str_count; ++i) {
+			const u64 pos = tmp.getPosition();
+			const char* key = (const char*)(uintptr)tmp.read<u64>();
+			const char* val = tmp.readString();
+			memcpy(m_data.getMutableData() + pos, &val, sizeof(val));
+			map.insert(key, val);
+		}
+
+		forEachThread([&](ThreadContextProxy& ctx){
+			u32 p = ctx.begin;
+			const u32 end = ctx.end;
+			while (p != end) {
+				profiler::EventHeader header;
+				read(ctx, p, header);
+				switch (header.type) {
+					case profiler::EventType::BEGIN_BLOCK: {
+						u64 tmp;
+						read(ctx, p + sizeof(profiler::EventHeader), tmp);
+						const char* name = (const char*)(uintptr)tmp;
+						const char* new_val = map[name];
+						overwrite(ctx, u32(p + sizeof(profiler::EventHeader)), new_val);
+						break;
+					}
+					case profiler::EventType::INT: {
+						profiler::IntRecord r;
+						read(ctx, p + sizeof(profiler::EventHeader), (u8*)&r, sizeof(r));
+						const char* new_val = map[r.key];
+						r.key = new_val;
+						overwrite(ctx, u32(p + sizeof(profiler::EventHeader)), r);
+						break;
+					}
+					default: break;
+				}
+				p += header.size;
+			}
+		});
+	}
+
+	void load() {
+		char path[LUMIX_MAX_PATH];
+		if (os::getOpenFilename(Span(path), "Profile data\0*.lpd", nullptr)) {
+			os::InputFile file;
+			if (file.open(path)) {
+				m_data.resize(file.size());
+				if (!file.read(m_data.getMutableData(), m_data.size())) {
+					logError("Could not read ", path);
+					m_data.clear();
+				}
+				else {
+					patchStrings();
+					findEnd();
+					m_is_paused = true;
+				}
+				file.close();
+			}
+			else {
+				logError("Could not open ", path);
+			}
+		}
+	}
+
+	template <typename F> void forEachThread(const F& f) {
+		if (m_data.empty()) return;
+
+		InputMemoryStream blob(m_data);
+		const u32 version = blob.read<u32>();
+		const u32 count = blob.read<u32>();
+		u8* iter = (u8*)blob.skip(0);
+		ThreadContextProxy global(iter);
+		f(global);
+		iter = global.next();
+		for (u32 i = 0; i < count; ++i) {
+			ThreadContextProxy ctx(iter);
+			f(ctx);
+			iter = ctx.next();
+		}
+	}
+
+	void save() {
+		char path[LUMIX_MAX_PATH];
+		if (os::getSaveFilename(Span(path), "Profile data\0*.lpd", "lpd")) {
+			os::OutputFile file;
+			if (file.open(path)) {
+				if (!file.write(m_data.getMutableData(), m_data.size())) {
+					logError("Could not write ", path);
+				}
+				
+				file.close();
+			}
+			else {
+				logError("Could not open ", path);
+			}
+		}	
+	}
 
 	void onGUI() override
 	{
@@ -135,7 +345,7 @@ struct ProfilerUIImpl final : ProfilerUI
 
 	struct AllocationStackNode
 	{
-		explicit AllocationStackNode(Debug::StackNode* stack_node,
+		explicit AllocationStackNode(debug::StackNode* stack_node,
 			size_t inclusive_size,
 			IAllocator& allocator)
 			: m_children(allocator)
@@ -166,9 +376,9 @@ struct ProfilerUIImpl final : ProfilerUI
 
 		size_t m_inclusive_size;
 		bool m_open;
-		Debug::StackNode* m_stack_node;
+		debug::StackNode* m_stack_node;
 		Array<AllocationStackNode*> m_children;
-		Array<Debug::Allocator::AllocationInfo*> m_allocations;
+		Array<debug::Allocator::AllocationInfo*> m_allocations;
 	};
 
 
@@ -176,14 +386,14 @@ struct ProfilerUIImpl final : ProfilerUI
 	void onGUIMemoryProfiler();
 	void onGUIResources();
 	void onFrame();
-	void addToTree(Debug::Allocator::AllocationInfo* info);
+	void addToTree(debug::Allocator::AllocationInfo* info);
 	void refreshAllocations();
 	void showAllocationTree(AllocationStackNode* node, int column) const;
 	AllocationStackNode* getOrCreate(AllocationStackNode* my_node,
-		Debug::StackNode* external_node, size_t size);
+		debug::StackNode* external_node, size_t size);
 
 	DefaultAllocator m_allocator;
-	Debug::Allocator* m_main_allocator;
+	debug::Allocator* m_main_allocator;
 	ResourceManagerHub& m_resource_manager;
 	AllocationStackNode* m_allocation_root;
 	int m_allocation_size_from;
@@ -195,7 +405,9 @@ struct ProfilerUIImpl final : ProfilerUI
 	char m_filter[100];
 	char m_resource_filter[100];
 	Engine& m_engine;
-	OS::Timer m_timer;
+	HashMap<u32, ThreadRecord> m_threads;
+	OutputMemoryStream m_data;
+	os::Timer m_timer;
 	float m_autopause = -33.3333f;
 	bool m_show_context_switches = false;
 	bool m_show_frames = true;
@@ -205,7 +417,7 @@ struct ProfilerUIImpl final : ProfilerUI
 		bool is_current_pos = false;
 	} hovered_signal;
 	i64 hovered_link = 0;
-	Profiler::GPUMemStatsBlock m_gpu_mem_stats;
+	profiler::GPUMemStatsBlock m_gpu_mem_stats;
 	bool m_is_gpu_mem_stats_valid = false;
 };
 
@@ -227,7 +439,8 @@ void ProfilerUIImpl::onGUIResources()
 {
 	if (!ImGui::CollapsingHeader("Resources")) return;
 
-	ImGui::SetNextItemWidth(-20);
+	const float w = ImGui::CalcTextSize(ICON_FA_TIMES).x + ImGui::GetStyle().ItemSpacing.x * 2;
+	ImGui::SetNextItemWidth(-w);
 	ImGui::InputTextWithHint("##resource_filter", "Filter", m_resource_filter, sizeof(m_resource_filter));
 	ImGui::SameLine();
 	if (ImGuiEx::IconButton(ICON_FA_TIMES, "Clear filter")) {
@@ -300,7 +513,7 @@ void ProfilerUIImpl::onGUIResources()
 
 
 ProfilerUIImpl::AllocationStackNode* ProfilerUIImpl::getOrCreate(AllocationStackNode* my_node,
-	Debug::StackNode* external_node,
+	debug::StackNode* external_node,
 	size_t size)
 {
 	for (auto* child : my_node->m_children)
@@ -318,10 +531,10 @@ ProfilerUIImpl::AllocationStackNode* ProfilerUIImpl::getOrCreate(AllocationStack
 }
 
 
-void ProfilerUIImpl::addToTree(Debug::Allocator::AllocationInfo* info)
+void ProfilerUIImpl::addToTree(debug::Allocator::AllocationInfo* info)
 {
-	Debug::StackNode* nodes[1024];
-	int count = Debug::StackTree::getPath(info->stack_leaf, Span(nodes));
+	debug::StackNode* nodes[1024];
+	int count = debug::StackTree::getPath(info->stack_leaf, Span(nodes));
 
 	auto node = m_allocation_root;
 	for (int i = count - 1; i >= 0; --i)
@@ -358,7 +571,7 @@ void ProfilerUIImpl::showAllocationTree(AllocationStackNode* node, int column) c
 	{
 		char fn_name[100];
 		int line;
-		if (Debug::StackTree::getFunction(node->m_stack_node, Span(fn_name), Ref(line)))
+		if (debug::StackTree::getFunction(node->m_stack_node, Span(fn_name), line))
 		{
 			if (line >= 0)
 			{
@@ -453,36 +666,6 @@ void ProfilerUIImpl::onGUIMemoryProfiler()
 	ImGui::Columns(1);
 }
 
-template <typename T>
-static void read(Profiler::ThreadState& ctx, u32 p, T& value)
-{
-	const u8* buf = ctx.buffer;
-	const u32 buf_size = ctx.buffer_size;
-	const u32 l = p % buf_size;
-	if (l + sizeof(value) <= buf_size) {
-		memcpy(&value, buf + l, sizeof(value));
-		return;
-	}
-
-	memcpy(&value, buf + l, buf_size - l);
-	memcpy((u8*)&value + (buf_size - l), buf, sizeof(value) - (buf_size - l));
-}
-
-
-static void read(Profiler::ThreadState& ctx, u32 p, u8* ptr, int size)
-{
-	const u8* buf = ctx.buffer;
-	const u32 buf_size = ctx.buffer_size;
-	const u32 l = p % buf_size;
-	if (l + size <= buf_size) {
-		memcpy(ptr, buf + l, size);
-		return;
-	}
-
-	memcpy(ptr, buf + l, buf_size - l);
-	memcpy(ptr + (buf_size - l), buf, size - (buf_size - l));
-}
-
 static void renderArrow(ImVec2 p_min, ImGuiDir dir, float scale, ImDrawList* dl)
 {
 	const float h = ImGui::GetFontSize() * 1.00f;
@@ -515,39 +698,26 @@ static void renderArrow(ImVec2 p_min, ImGuiDir dir, float scale, ImDrawList* dl)
 	dl->AddTriangleFilled(center + a, center + b, center + c, ImGui::GetColorU32(ImGuiCol_Text));
 }
 
-
-struct VisibleBlock
-{
-	const char* name;
-};
-
-
-struct ThreadRecord
-{
-	float y;
-	u32 thread_id;
-	const char* name;
-	struct {
-		u64 time;
-		bool is_enter;
-	}last_context_switch;
-};
-
-
 void ProfilerUIImpl::onGUICPUProfiler()
 {
 	if (!ImGui::CollapsingHeader("CPU/GPU")) return;
 
-	if (ImGui::Checkbox("Pause", &m_is_paused)) {
-		Profiler::pause(m_is_paused);
-	}
-	if (!m_is_paused) {
-		m_end = OS::Timer::getRawTimestamp();
+	if (m_autopause > 0 && !m_is_paused && profiler::getLastFrameDuration() * 1000.f > m_autopause) {
+		m_is_paused = true;
+		profiler::pause(m_is_paused);
+		onPause();
 	}
 
-	Profiler::GlobalState global;
-	const int contexts_count = global.threadsCount();
+	if (ImGui::Button(m_is_paused ? ICON_FA_PLAY : ICON_FA_PAUSE)) {
+		m_is_paused = !m_is_paused;
+		profiler::pause(m_is_paused);
+		if (m_is_paused) onPause();
+	}
+
+	ImGui::SameLine();
 	if (ImGui::BeginMenu("Advanced")) {
+		if (ImGui::MenuItem("Load")) load();
+		if (ImGui::MenuItem("Save")) save();
 		ImGui::Checkbox("Show frames", &m_show_frames);
 		ImGui::Text("Zoom: %f", m_range / double(DEFAULT_RANGE));
 		if (ImGui::MenuItem("Reset zoom")) m_range = DEFAULT_RANGE;
@@ -559,13 +729,15 @@ void ProfilerUIImpl::onGUICPUProfiler()
 			ImGui::InputFloat("Autopause limit (ms)", &m_autopause, 1.f, 10.f, "%.2f");
 		}
 		if (ImGui::BeginMenu("Threads")) {
-			for (int i = 0; i < contexts_count; ++i) {
-				Profiler::ThreadState ctx(global, i);
-				ImGui::Checkbox(ctx.name, &ctx.show);
-			}
+			forEachThread([&](const ThreadContextProxy& ctx){
+				auto thread = m_threads.find(ctx.thread_id);
+				if (thread.isValid()) {
+					ImGui::Checkbox(StaticString<128>(ctx.name, "##t", ctx.thread_id), &thread.value().show);
+				}
+			});
 			ImGui::EndMenu();
 		}
-		if (Profiler::contextSwitchesEnabled())
+		if (profiler::contextSwitchesEnabled())
 		{
 			ImGui::Checkbox("Show context switches", &m_show_context_switches);
 		}
@@ -577,6 +749,10 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		ImGui::EndMenu();
 	}
 
+	if (m_data.empty()) return;
+	if (!m_is_paused) return;
+	ThreadContextProxy global(m_data.getMutableData() + 2 * sizeof(u32));
+
 	const u64 view_start = m_end - m_range;
 
 	const float from_x = ImGui::GetCursorScreenPos().x;
@@ -584,24 +760,24 @@ void ProfilerUIImpl::onGUICPUProfiler()
 	const float to_x = from_x + ImGui::GetContentRegionAvail().x;
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 
-	HashMap<u32, ThreadRecord> threads_records(64, m_allocator);
 	auto getThreadName = [&](u32 thread_id){
-		for(auto iter : threads_records) {
-			if(iter.thread_id == thread_id) return iter.name;
-		}
-		return "Unknown";
+		auto iter = m_threads.find(thread_id);
+		return iter.isValid() ? iter.value().name : "Unknown";
 	};
 	bool any_hovered_signal = false;
 	bool any_hovered_link = false;
 	bool hovered_signal_current_pos = false;
 
-	for (int i = 0; i < contexts_count; ++i) {
-		Profiler::ThreadState ctx(global, i);
-		if (!ctx.show) continue;
+	forEachThread([&](const ThreadContextProxy& ctx) {
+		if (ctx.thread_id == 0) return;
+		auto thread = m_threads.find(ctx.thread_id);
 		
-		threads_records.insert(ctx.thread_id, { ImGui::GetCursorScreenPos().y, ctx.thread_id, ctx.name, 0});
-
-		if (!ImGui::TreeNode(ctx.buffer, "%s", ctx.name)) continue;
+		if (!thread.isValid()) {
+			thread = m_threads.insert(ctx.thread_id, { 0, ctx.thread_id, ctx.name, ctx.default_show, 0});
+		}
+		thread.value().y = ImGui::GetCursorScreenPos().y;
+		if (!thread.value().show) return;
+		if (!ImGui::TreeNode(ctx.buffer, "%s", ctx.name)) return;
 
 		float y = ImGui::GetCursorScreenPos().y;
 		float top = y;
@@ -612,14 +788,14 @@ void ProfilerUIImpl::onGUICPUProfiler()
 			i32 switch_id;
 			u32 color;
 			i64 link;
-			Profiler::JobRecord job_info;
+			profiler::JobRecord job_info;
 		} open_blocks[64];
 		int level = -1;
 		u32 p = ctx.begin;
 		const u32 end = ctx.end;
 
 		struct Property {
-			Profiler::EventHeader header;
+			profiler::EventHeader header;
 			int level;
 			int offset;
 		} properties[64];
@@ -639,7 +815,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 			const ImVec2 ra(x_start, block_y);
 			const ImVec2 rb(x_end, block_y + 19);
 			if (hovered_signal.signal == open_blocks[level].job_info.signal_on_finish
-				&& hovered_signal.signal != JobSystem::INVALID_HANDLE
+				&& hovered_signal.signal != jobs::INVALID_HANDLE
 				&& hovered_signal.is_current_pos)
 			{
 				dl->AddLine(ra, ImVec2(hovered_signal.x, hovered_signal.y - 2), 0xff0000ff);
@@ -653,7 +829,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 				dl->AddText(ImVec2(x_start + 2, block_y), 0xff000000, name);
 			}
 			if (ImGui::IsMouseHoveringRect(ra, rb)) {
-				const u64 freq = Profiler::frequency();
+				const u64 freq = profiler::frequency();
 				const float t = 1000 * float((to - from) / double(freq));
 				ImGui::BeginTooltip();
 				ImGui::Text("%s (%.3f ms)", name, t);
@@ -663,25 +839,25 @@ void ProfilerUIImpl::onGUICPUProfiler()
 					any_hovered_link = true;
 					hovered_link = open_blocks[level].link;
 				}
-				if (open_blocks[level].job_info.signal_on_finish != JobSystem::INVALID_HANDLE) {
+				if (open_blocks[level].job_info.signal_on_finish != jobs::INVALID_HANDLE) {
 					any_hovered_signal = true;
 					hovered_signal.signal = open_blocks[level].job_info.signal_on_finish;
 					ImGui::Text("Signal on finish: %d", open_blocks[level].job_info.signal_on_finish);
 				}
-				if (open_blocks[level].job_info.precondition != JobSystem::INVALID_HANDLE) {
+				if (open_blocks[level].job_info.precondition != jobs::INVALID_HANDLE) {
 					ImGui::Text("Precondition signal: %d", open_blocks[level].job_info.precondition);
 				}
 				for (int i = 0; i < properties_count; ++i) {
 					if (properties[i].level != level) continue;
 
 					switch (properties[i].header.type) {
-					case Profiler::EventType::INT: {
-						Profiler::IntRecord r;
+					case profiler::EventType::INT: {
+						profiler::IntRecord r;
 						read(ctx, properties[i].offset, (u8*)&r, sizeof(r));
 						ImGui::Text("%s: %d", r.key, r.value);
 						break;
 					}
-					case Profiler::EventType::STRING: {
+					case profiler::EventType::STRING: {
 						char tmp[128];
 						const int tmp_size = properties[i].header.size - sizeof(properties[i].header);
 						read(ctx, properties[i].offset, (u8*)tmp, tmp_size);
@@ -696,14 +872,14 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		};
 
 		while (p != end) {
-			Profiler::EventHeader header;
+			profiler::EventHeader header;
 			read(ctx, p, header);
 			switch (header.type) {
-			case Profiler::EventType::END_FIBER_WAIT:
-			case Profiler::EventType::BEGIN_FIBER_WAIT: {
-				const bool is_begin = header.type == Profiler::EventType::BEGIN_FIBER_WAIT;
-				Profiler::FiberWaitRecord r;
-				read(ctx, p + sizeof(Profiler::EventHeader), r);
+			case profiler::EventType::END_FIBER_WAIT:
+			case profiler::EventType::BEGIN_FIBER_WAIT: {
+				const bool is_begin = header.type == profiler::EventType::BEGIN_FIBER_WAIT;
+				profiler::FiberWaitRecord r;
+				read(ctx, p + sizeof(profiler::EventHeader), r);
 				if (r.job_system_signal == hovered_signal.signal) {
 					float t = float((header.time - view_start) / double(m_range));
 					if (header.time < view_start) {
@@ -719,7 +895,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 						? float((header.time - view_start) / double(m_range))
 						: -float((view_start - header.time) / double(m_range));
 					const float x = from_x * (1 - t) + to_x * t;
-					const u32 color = header.type == Profiler::EventType::END_FIBER_WAIT ? 0xffff0000 : 0xff00ff00;
+					const u32 color = header.type == profiler::EventType::END_FIBER_WAIT ? 0xffff0000 : 0xff00ff00;
 					dl->AddRect(ImVec2(x - 2, y - 2), ImVec2(x + 2, y + 2), color);
 					const bool mouse_hovered = ImGui::IsMouseHoveringRect(ImVec2(x - 2, y - 2), ImVec2(x + 2, y + 2));
 					if (mouse_hovered || (is_begin && hovered_signal.signal == r.job_system_signal)) {
@@ -740,31 +916,31 @@ void ProfilerUIImpl::onGUICPUProfiler()
 				}
 				break;
 			}
-			case Profiler::EventType::LINK:
+			case profiler::EventType::LINK:
 				if (level >= 0) {
-					read(ctx, p + sizeof(Profiler::EventHeader), open_blocks[level].link);
+					read(ctx, p + sizeof(profiler::EventHeader), open_blocks[level].link);
 				}
 				break;
-			case Profiler::EventType::BEGIN_BLOCK:
+			case profiler::EventType::BEGIN_BLOCK:
 				++level;
 				ASSERT(level < (int)lengthOf(open_blocks));
 				open_blocks[level].link = 0;
 				open_blocks[level].offset = p;
 				open_blocks[level].color = 0xffDDddDD;
-				open_blocks[level].job_info.signal_on_finish = JobSystem::INVALID_HANDLE;
-				open_blocks[level].job_info.precondition = JobSystem::INVALID_HANDLE;
+				open_blocks[level].job_info.signal_on_finish = jobs::INVALID_HANDLE;
+				open_blocks[level].job_info.precondition = jobs::INVALID_HANDLE;
 				lines = maximum(lines, level + 1);
 				y += 20.f;
 				break;
-			case Profiler::EventType::END_BLOCK:
+			case profiler::EventType::END_BLOCK:
 				y = maximum(y - 20.f, top);
 				if (level >= 0) {
-					Profiler::EventHeader start_header;
+					profiler::EventHeader start_header;
 					read(ctx, open_blocks[level].offset, start_header);
 					const char* name;
-					read(ctx, open_blocks[level].offset + sizeof(Profiler::EventHeader), name);
+					read(ctx, open_blocks[level].offset + sizeof(profiler::EventHeader), name);
 					u32 color = open_blocks[level].color;
-					if (open_blocks[level].job_info.signal_on_finish != JobSystem::INVALID_HANDLE
+					if (open_blocks[level].job_info.signal_on_finish != jobs::INVALID_HANDLE
 						&& hovered_signal.signal == open_blocks[level].job_info.signal_on_finish
 						|| hovered_link == open_blocks[level].link 
 						&& hovered_link != 0)
@@ -778,15 +954,15 @@ void ProfilerUIImpl::onGUICPUProfiler()
 					--level;
 				}
 				break;
-			case Profiler::EventType::FRAME:
+			case profiler::EventType::FRAME:
 				ASSERT(false);	//should be in global context
 				break;
-			case Profiler::EventType::INT:
-			case Profiler::EventType::STRING: {
+			case profiler::EventType::INT:
+			case profiler::EventType::STRING: {
 				if (properties_count < (int)lengthOf(properties) && level >= 0) {
 					properties[properties_count].header = header;
 					properties[properties_count].level = level;
-					properties[properties_count].offset = sizeof(Profiler::EventHeader) + p;
+					properties[properties_count].offset = sizeof(profiler::EventHeader) + p;
 					++properties_count;
 				}
 				else {
@@ -794,14 +970,14 @@ void ProfilerUIImpl::onGUICPUProfiler()
 				}
 				break;
 			}
-			case Profiler::EventType::JOB_INFO:
+			case profiler::EventType::JOB_INFO:
 				if (level >= 0) {
-					read(ctx, p + sizeof(Profiler::EventHeader), open_blocks[level].job_info);
+					read(ctx, p + sizeof(profiler::EventHeader), open_blocks[level].job_info);
 				}
 				break;
-			case Profiler::EventType::BLOCK_COLOR:
+			case profiler::EventType::BLOCK_COLOR:
 				if (level >= 0) {
-					read(ctx, p + sizeof(Profiler::EventHeader), open_blocks[level].color);
+					read(ctx, p + sizeof(profiler::EventHeader), open_blocks[level].color);
 				}
 				break;
 			default: ASSERT(false); break;
@@ -810,10 +986,10 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		}
 		while (level >= 0) {
 			y -= 20.f;
-			Profiler::EventHeader start_header;
+			profiler::EventHeader start_header;
 			read(ctx, open_blocks[level].offset, start_header);
 			const char* name;
-			read(ctx, open_blocks[level].offset + sizeof(Profiler::EventHeader), name);
+			read(ctx, open_blocks[level].offset + sizeof(profiler::EventHeader), name);
 			draw_block(start_header.time, m_end, name, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
 			--level;
 		}
@@ -821,10 +997,10 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		ImGui::Dummy(ImVec2(to_x - from_x, lines * 20.f));
 
 		ImGui::TreePop();
-	}
+	});
 
 	if (!any_hovered_link) hovered_link = 0;
-	if (!any_hovered_signal) hovered_signal.signal = JobSystem::INVALID_HANDLE;
+	if (!any_hovered_signal) hovered_signal.signal = jobs::INVALID_HANDLE;
 	if (!hovered_signal_current_pos) hovered_signal.is_current_pos = false;
 
 	auto get_view_x = [&](u64 time) {
@@ -834,7 +1010,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		return from_x * (1 - t) + to_x * t;
 	};
 
-	auto draw_cswitch = [&](float x, const Profiler::ContextSwitchRecord& r, ThreadRecord& tr, bool is_enter) {
+	auto draw_cswitch = [&](float x, const profiler::ContextSwitchRecord& r, ThreadRecord& tr, bool is_enter) {
 		const float y = tr.y + 10;
 		dl->AddLine(ImVec2(x, y - 5), ImVec2(x, y + 5), 0xff00ff00);
 		if (!is_enter) {
@@ -862,7 +1038,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 	};
 
 	{
-		Profiler::ThreadState ctx(global, -1);
+		ThreadContextProxy& ctx = global;
 
 		float before_gpu_y = ImGui::GetCursorScreenPos().y;
 
@@ -877,23 +1053,23 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		u32 p = ctx.begin;
 		const u32 end = ctx.end;
 		while (p != end) {
-			Profiler::EventHeader header;
+			profiler::EventHeader header;
 			read(ctx, p, header);
 			switch (header.type) {
-				case Profiler::EventType::BEGIN_GPU_BLOCK:
+				case profiler::EventType::BEGIN_GPU_BLOCK:
 					++level;
 					ASSERT(level < (int)lengthOf(open_blocks));
 					open_blocks[level] = p;
 					lines = maximum(lines, level + 1);
 					break;
-				case Profiler::EventType::END_GPU_BLOCK:
+				case profiler::EventType::END_GPU_BLOCK:
 					if (level >= 0 && gpu_open) {
-						Profiler::EventHeader start_header;
+						profiler::EventHeader start_header;
 						read(ctx, open_blocks[level], start_header);
-						Profiler::GPUBlock data;
-						read(ctx, open_blocks[level] + sizeof(Profiler::EventHeader), data);
+						profiler::GPUBlock data;
+						read(ctx, open_blocks[level] + sizeof(profiler::EventHeader), data);
 						u64 to;
-						read(ctx, p + sizeof(Profiler::EventHeader), to);
+						read(ctx, p + sizeof(profiler::EventHeader), to);
 						const u64 from = data.timestamp;
 						const float t_start = float(int(from - view_start) / double(m_range));
 						const float t_end = float(int(to - view_start) / double(m_range));
@@ -915,7 +1091,7 @@ void ProfilerUIImpl::onGUICPUProfiler()
 							dl->AddText(ImVec2(x_start + 2, block_y), 0xff000000, data.name);
 						}
 						if (ImGui::IsMouseHoveringRect(ra, rb)) {
-							const u64 freq = Profiler::frequency();
+							const u64 freq = profiler::frequency();
 							const float t = 1000 * float((to - from) / double(freq));
 							ImGui::BeginTooltip();
 							ImGui::Text("%s (%.3f ms)", data.name, t);
@@ -931,25 +1107,25 @@ void ProfilerUIImpl::onGUICPUProfiler()
 						--level;
 					}
 					break;
-				case Profiler::EventType::GPU_FRAME:
+				case profiler::EventType::GPU_FRAME:
 					break;
-				case Profiler::EventType::GPU_MEM_STATS:
-					read(ctx, p + sizeof(Profiler::EventHeader), m_gpu_mem_stats);
+				case profiler::EventType::GPU_MEM_STATS:
+					read(ctx, p + sizeof(profiler::EventHeader), m_gpu_mem_stats);
 					m_is_gpu_mem_stats_valid = true;
 					break;
-				case Profiler::EventType::FRAME:
+				case profiler::EventType::FRAME:
 					if (header.time >= view_start && header.time <= m_end && m_show_frames) {
 						const float t = float((header.time - view_start) / double(m_range));
 						const float x = from_x * (1 - t) + to_x * t;
 						dl->AddLine(ImVec2(x, from_y), ImVec2(x, before_gpu_y), 0xffff0000);
 					}
 					break;
-				case Profiler::EventType::CONTEXT_SWITCH:
+				case profiler::EventType::CONTEXT_SWITCH:
 					if (m_show_context_switches && header.time >= view_start && header.time <= m_end) {
-						Profiler::ContextSwitchRecord r;
-						read(ctx, p + sizeof(Profiler::EventHeader), r);
-						auto new_iter = threads_records.find(r.new_thread_id);
-						auto old_iter = threads_records.find(r.old_thread_id);
+						profiler::ContextSwitchRecord r;
+						read(ctx, p + sizeof(profiler::EventHeader), r);
+						auto new_iter = m_threads.find(r.new_thread_id);
+						auto old_iter = m_threads.find(r.old_thread_id);
 						const float x = get_view_x(header.time);
 
 						if (new_iter.isValid()) draw_cswitch(x, r, new_iter.value(), true);
@@ -986,32 +1162,19 @@ void ProfilerUIImpl::onGUICPUProfiler()
 		}
 	}
 
-	for (const ThreadRecord& tr : threads_records) {
+	for (const ThreadRecord& tr : m_threads) {
 		if (tr.last_context_switch.is_enter) {
 			const float x = get_view_x(tr.last_context_switch.time);
 			dl->AddLine(ImVec2(to_x, tr.y + 10), ImVec2(x, tr.y + 10), 0xff00ff00);
 		}
 	}
-
-	if (m_autopause > 0 && !m_is_paused && Profiler::getLastFrameDuration() * 1000.f > m_autopause) {
-		m_is_paused = true;
-		Profiler::pause(m_is_paused);
-		m_end = OS::Timer::getRawTimestamp();
-	}
 }
 
 
-ProfilerUI* ProfilerUI::create(Engine& engine)
+UniquePtr<ProfilerUI> ProfilerUI::create(Engine& engine)
 {
-	Debug::Allocator* allocator = engine.getAllocator().isDebug() ? static_cast<Debug::Allocator*>(&engine.getAllocator()) : nullptr;
-	return LUMIX_NEW(engine.getAllocator(), ProfilerUIImpl)(allocator, engine);
-}
-
-
-void ProfilerUI::destroy(ProfilerUI& ui)
-{
-	auto& ui_impl = static_cast<ProfilerUIImpl&>(ui);
-	LUMIX_DELETE(ui_impl.m_engine.getAllocator(), &ui);
+	debug::Allocator* allocator = engine.getAllocator().isDebug() ? static_cast<debug::Allocator*>(&engine.getAllocator()) : nullptr;
+	return UniquePtr<ProfilerUIImpl>::create(engine.getAllocator(), allocator, engine);
 }
 
 

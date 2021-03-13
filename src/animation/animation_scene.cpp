@@ -7,9 +7,9 @@
 #include "engine/associative_array.h"
 #include "engine/crc32.h"
 #include "engine/engine.h"
-#include "engine/lua_wrapper.h"
 #include "engine/atomic.h"
 #include "engine/job_system.h"
+#include "engine/log.h"
 #include "engine/profiler.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
@@ -34,10 +34,10 @@ enum class AnimationSceneVersion
 };
 
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType ANIMABLE_TYPE = Reflection::getComponentType("animable");
-static const ComponentType PROPERTY_ANIMATOR_TYPE = Reflection::getComponentType("property_animator");
-static const ComponentType ANIMATOR_TYPE = Reflection::getComponentType("animator");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType ANIMABLE_TYPE = reflection::getComponentType("animable");
+static const ComponentType PROPERTY_ANIMATOR_TYPE = reflection::getComponentType("property_animator");
+static const ComponentType ANIMATOR_TYPE = reflection::getComponentType("animator");
 
 
 struct AnimationSceneImpl final : AnimationScene
@@ -47,9 +47,9 @@ struct AnimationSceneImpl final : AnimationScene
 	struct Animator
 	{
 		EntityRef entity;
-		Anim::Controller* resource = nullptr;
+		anim::Controller* resource = nullptr;
 		u32 default_set = 0;
-		Anim::RuntimeContext* ctx = nullptr;
+		anim::RuntimeContext* ctx = nullptr;
 		LocalRigidTransform root_motion = {{0, 0, 0}, {0, 0, 0, 1}};
 
 		struct IK {
@@ -97,18 +97,6 @@ struct AnimationSceneImpl final : AnimationScene
 		, m_animator_map(allocator)
 	{
 		m_is_game_running = false;
-		universe.registerComponentType(PROPERTY_ANIMATOR_TYPE
-			, this
-			, &AnimationSceneImpl::createPropertyAnimator
-			, &AnimationSceneImpl::destroyPropertyAnimator);
-		universe.registerComponentType(ANIMABLE_TYPE
-			, this
-			, &AnimationSceneImpl::createAnimable
-			, &AnimationSceneImpl::destroyAnimable);
-		universe.registerComponentType(ANIMATOR_TYPE
-			, this
-			, &AnimationSceneImpl::createAnimator
-			, &AnimationSceneImpl::destroyAnimator);
 	}
 
 	void init() override {
@@ -143,39 +131,27 @@ struct AnimationSceneImpl final : AnimationScene
 		for (Animator& animator : m_animators)
 		{
 			unloadResource(animator.resource);
-			setAnimatorSource(animator, nullptr);
+			setSource(animator, nullptr);
 		}
 		m_animators.clear();
 	}
 
 
-	static int setIK(lua_State* L)
-	{
-		AnimationSceneImpl* scene = LuaWrapper::checkArg<AnimationSceneImpl*>(L, 1);
-		EntityRef entity = LuaWrapper::checkArg<EntityRef>(L, 2);
-		auto iter = scene->m_animator_map.find(entity);
-		if (!iter.isValid()) {
-			luaL_argerror(L, 2, "entity does not have animator");
-		}
-		Animator& animator = scene->m_animators[iter.value()];
-		const u32 index = LuaWrapper::checkArg<u32>(L, 3);
-		if (index >= lengthOf(animator.inverse_kinematics)) {
-			luaL_argerror(L, 3, "Inverse kinematics index out of range");
-		}
+	void setAnimatorIK(EntityRef entity, u32 index, float weight, const Vec3& target) override {
+		auto iter = m_animator_map.find(entity);
+		Animator& animator = m_animators[iter.value()];
 		Animator::IK& ik = animator.inverse_kinematics[index];
-		ik.weight = clamp(LuaWrapper::checkArg<float>(L, 4), 0.f, 1.f);
-		ik.target = LuaWrapper::checkArg<Vec3>(L, 5);
-
-		return 0;
+		ik.weight = clamp(weight, 0.f, 1.f);
+		ik.target = target;
 	}
 
 
 	int getAnimatorInputIndex(EntityRef entity, const char* name) const override
 	{
 		const Animator& animator = m_animators[m_animator_map[entity]];
-		Anim::InputDecl& decl = animator.resource->m_inputs;
+		anim::InputDecl& decl = animator.resource->m_inputs;
 		for (u32 i = 0; i < lengthOf(decl.inputs); ++i) {
-			if (decl.inputs[i].type != Anim::InputDecl::EMPTY && equalStrings(decl.inputs[i].name, name)) return i;
+			if (decl.inputs[i].type != anim::InputDecl::EMPTY && equalStrings(decl.inputs[i].name, name)) return i;
 		}
 		return -1;
 	}
@@ -187,15 +163,15 @@ struct AnimationSceneImpl final : AnimationScene
 		if (!iter.isValid()) return;
 
 		Animator& animator = m_animators[iter.value()];
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		if (input_idx >= decl.inputs_count) return;
 		if (!animator.ctx) return;
 
-		if (decl.inputs[input_idx].type == Anim::InputDecl::FLOAT) {
+		if (decl.inputs[input_idx].type == anim::InputDecl::FLOAT) {
 			memcpy(&animator.ctx->inputs[decl.inputs[input_idx].offset], &value, sizeof(value));
 		}
 		else {
-			logWarning("Animation") << "Trying to set float to " << decl.inputs[input_idx].name;
+			logWarning("Trying to set float to ", decl.inputs[input_idx].name);
 		}
 	}
 
@@ -206,15 +182,15 @@ struct AnimationSceneImpl final : AnimationScene
 		if (!iter.isValid()) return;
 
 		Animator& animator = m_animators[iter.value()];
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		if (input_idx >= decl.inputs_count) return;
 		if (!animator.ctx) return;
 
-		if (decl.inputs[input_idx].type == Anim::InputDecl::U32) {
+		if (decl.inputs[input_idx].type == anim::InputDecl::U32) {
 			*(u32*)&animator.ctx->inputs[decl.inputs[input_idx].offset] = value;
 		}
 		else {
-			logWarning("Animation") << "Trying to set int to " << decl.inputs[input_idx].name;
+			logWarning("Trying to set int to ", decl.inputs[input_idx].name);
 		}
 	}
 
@@ -225,15 +201,15 @@ struct AnimationSceneImpl final : AnimationScene
 		if (!iter.isValid()) return;
 
 		Animator& animator = m_animators[iter.value()];
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		if (input_idx >= decl.inputs_count) return;
 		if (!animator.ctx) return;
 
-		if (decl.inputs[input_idx].type == Anim::InputDecl::BOOL) {
+		if (decl.inputs[input_idx].type == anim::InputDecl::BOOL) {
 			*(bool*)&animator.ctx->inputs[decl.inputs[input_idx].offset] = value;
 		}
 		else {
-			logWarning("Animation") << "Trying to set bool to " << decl.inputs[input_idx].name;
+			logWarning("Trying to set bool to ", decl.inputs[input_idx].name);
 		}
 	}
 
@@ -277,11 +253,11 @@ struct AnimationSceneImpl final : AnimationScene
 	{
 		if (!res) return;
 
-		res->getResourceManager().unload(*res);
+		res->decRefCount();
 	}
 
 
-	void setAnimatorSource(Animator& animator, Anim::Controller* res)
+	void setSource(Animator& animator, anim::Controller* res)
 	{
 		if (animator.resource == res) return;
 		if (animator.resource != nullptr) {
@@ -343,7 +319,7 @@ struct AnimationSceneImpl final : AnimationScene
 		const u32 idx = m_animator_map[entity];
 		Animator& animator = m_animators[idx];
 		unloadResource(animator.resource);
-		setAnimatorSource(animator, nullptr);
+		setSource(animator, nullptr);
 		const Animator& last = m_animators.back();
 		m_animator_map[last.entity] = idx;
 		m_animator_map.erase(entity);
@@ -381,7 +357,7 @@ struct AnimationSceneImpl final : AnimationScene
 	}
 
 
-	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map) override
+	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map, i32 version) override
 	{
 		u32 count;
 		serializer.read(count);
@@ -426,9 +402,9 @@ struct AnimationSceneImpl final : AnimationScene
 			animator.entity = entity_map.get(animator.entity);
 
 			const char* tmp = serializer.readString();
-			setAnimatorSource(animator, tmp[0] ? loadController(Path(tmp)) : nullptr);
+			setSource(animator, tmp[0] ? loadController(Path(tmp)) : nullptr);
 			m_animator_map.insert(animator.entity, m_animators.size());
-			m_animators.emplace(static_cast<Animator&&>(animator));
+			m_animators.push(animator);
 			m_universe.onComponentCreated(animator.entity, ANIMATOR_TYPE, this);
 		}
 	}
@@ -438,13 +414,13 @@ struct AnimationSceneImpl final : AnimationScene
 	{
 		Animator& animator = m_animators[m_animator_map[entity]];
 		unloadResource(animator.resource);
-		setAnimatorSource(animator, path.isValid() ? loadController(path) : nullptr);
+		setSource(animator, path.isEmpty() ? nullptr : loadController(path));
 		if (animator.resource && animator.resource->isReady() && m_is_game_running) {
 			animator.ctx = animator.resource->createRuntime(animator.default_set);
 		}
 	}
 
-	Anim::Controller* getAnimatorController(EntityRef entity) override {
+	anim::Controller* getAnimatorController(EntityRef entity) override {
 		const Animator& animator = m_animators[m_animator_map[entity]];
 		return animator.resource;
 	}
@@ -548,9 +524,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
-		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::FLOAT);
+		const anim::InputDecl& decl = animator.resource->m_inputs;
+		if (input_idx >= decl.inputs_count) return;
+		if (decl.inputs[input_idx].type != anim::InputDecl::FLOAT) return;
 
 		*(float*)&animator.ctx->inputs[decl.inputs[input_idx].offset] = value;
 	}
@@ -559,9 +535,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
-		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::BOOL);
+		const anim::InputDecl& decl = animator.resource->m_inputs;
+		if (input_idx >= decl.inputs_count) return;
+		if (decl.inputs[input_idx].type != anim::InputDecl::BOOL) return;
 
 		*(bool*)&animator.ctx->inputs[decl.inputs[input_idx].offset] = value;
 	}
@@ -570,9 +546,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return 0;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::FLOAT);
+		ASSERT(decl.inputs[input_idx].type == anim::InputDecl::FLOAT);
 
 		return *(float*)&animator.ctx->inputs[decl.inputs[input_idx].offset];
 	}
@@ -581,9 +557,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return 0;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::BOOL);
+		ASSERT(decl.inputs[input_idx].type == anim::InputDecl::BOOL);
 
 		return *(bool*)&animator.ctx->inputs[decl.inputs[input_idx].offset];
 	}
@@ -592,9 +568,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return 0;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
+		const anim::InputDecl& decl = animator.resource->m_inputs;
 		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::U32);
+		ASSERT(decl.inputs[input_idx].type == anim::InputDecl::U32);
 
 		return *(u32*)&animator.ctx->inputs[decl.inputs[input_idx].offset];
 	}
@@ -603,9 +579,9 @@ struct AnimationSceneImpl final : AnimationScene
 		Animator& animator = m_animators[m_animator_map[entity]];
 		if (!animator.ctx) return;
 
-		const Anim::InputDecl& decl = animator.resource->m_inputs;
-		ASSERT(input_idx < lengthOf(decl.inputs));
-		ASSERT(decl.inputs[input_idx].type == Anim::InputDecl::U32);
+		const anim::InputDecl& decl = animator.resource->m_inputs;
+		if (input_idx >= decl.inputs_count) return;
+		if (decl.inputs[input_idx].type != anim::InputDecl::U32) return;
 
 		*(u32*)&animator.ctx->inputs[decl.inputs[input_idx].offset] = value;
 	}
@@ -661,12 +637,11 @@ struct AnimationSceneImpl final : AnimationScene
 
 		animator.ctx->model = model;
 		animator.ctx->time_delta = Time::fromSeconds(time_delta);
-		// TODO
-		animator.ctx->root_bone_hash = crc32("RigRoot");
-		animator.resource->update(*animator.ctx, Ref(animator.root_motion));
+		animator.ctx->root_bone_hash = crc32(animator.resource->m_root_motion_bone);
+		animator.resource->update(*animator.ctx, animator.root_motion);
 
 		model->getRelativePose(*pose);
-		animator.resource->getPose(*animator.ctx, Ref(*pose));
+		animator.resource->getPose(*animator.ctx, *pose);
 		
 		for (Animator::IK& ik : animator.inverse_kinematics) {
 			if (ik.weight == 0) break;
@@ -690,12 +665,12 @@ struct AnimationSceneImpl final : AnimationScene
 		return getAbsolutePosition(pose, model, bone.parent_idx) * bone_transform;
 	}
 
-	static void updateIK(Anim::Controller::IK& res_ik, Animator::IK& ik, Pose& pose, Model& model)
+	static void updateIK(anim::Controller::IK& res_ik, Animator::IK& ik, Pose& pose, Model& model)
 	{
-		u32 indices[Anim::Controller::IK::MAX_BONES_COUNT];
-		LocalRigidTransform transforms[Anim::Controller::IK::MAX_BONES_COUNT];
-		Vec3 old_pos[Anim::Controller::IK::MAX_BONES_COUNT];
-		float len[Anim::Controller::IK::MAX_BONES_COUNT - 1];
+		u32 indices[anim::Controller::IK::MAX_BONES_COUNT];
+		LocalRigidTransform transforms[anim::Controller::IK::MAX_BONES_COUNT];
+		Vec3 old_pos[anim::Controller::IK::MAX_BONES_COUNT];
+		float len[anim::Controller::IK::MAX_BONES_COUNT - 1];
 		float len_sum = 0;
 		for (int i = 0; i < res_ik.bones_count; ++i) {
 			auto iter = model.getBoneIndex(res_ik.bones[i]);
@@ -721,7 +696,7 @@ struct AnimationSceneImpl final : AnimationScene
 			transforms[i] = parent_tr * tr;
 			old_pos[i] = transforms[i].pos;
 			if (i > 0) {
-				len[i - 1] = (transforms[i].pos - transforms[i - 1].pos).length();
+				len[i - 1] = length(transforms[i].pos - transforms[i - 1].pos);
 				len_sum += len[i - 1];
 			}
 			parent_tr = transforms[i];
@@ -729,8 +704,8 @@ struct AnimationSceneImpl final : AnimationScene
 
 		Vec3 target = ik.target;
 		Vec3 to_target = target - transforms[0].pos;
-		if (len_sum * len_sum < to_target.squaredLength()) {
-			to_target.normalize();
+		if (len_sum * len_sum < squaredLength(to_target)) {
+			to_target = normalize(to_target);
 			target = transforms[0].pos + to_target * len_sum;
 		}
 
@@ -738,12 +713,12 @@ struct AnimationSceneImpl final : AnimationScene
 			transforms[res_ik.bones_count - 1].pos = target;
 			
 			for (int i = res_ik.bones_count - 1; i > 1; --i) {
-				Vec3 dir = (transforms[i - 1].pos - transforms[i].pos).normalized();
+				Vec3 dir = normalize((transforms[i - 1].pos - transforms[i].pos));
 				transforms[i - 1].pos = transforms[i].pos + dir * len[i - 1];
 			}
 
 			for (int i = 1; i < res_ik.bones_count; ++i) {
-				Vec3 dir = (transforms[i].pos - transforms[i - 1].pos).normalized();
+				Vec3 dir = normalize((transforms[i].pos - transforms[i - 1].pos));
 				transforms[i].pos = transforms[i - 1].pos + dir * len[i - 1];
 			}
 		}
@@ -758,7 +733,7 @@ struct AnimationSceneImpl final : AnimationScene
 		}
 
 		// convert from object space to bone space
-		LocalRigidTransform ik_out[Anim::Controller::IK::MAX_BONES_COUNT];
+		LocalRigidTransform ik_out[anim::Controller::IK::MAX_BONES_COUNT];
 		for (int i = res_ik.bones_count - 1; i > 0; --i) {
 			transforms[i] = transforms[i - 1].inverted() * transforms[i];
 			ik_out[i].pos = transforms[i].pos;
@@ -836,7 +811,7 @@ struct AnimationSceneImpl final : AnimationScene
 		PROFILE_FUNCTION();
 		if (m_animables.size() == 0) return;
 
-		JobSystem::forEach(m_animables.size(), 1, [&](i32 idx, i32){
+		jobs::forEach(m_animables.size(), 1, [&](i32 idx, i32){
 			Animable& animable = m_animables.at(idx);
 			updateAnimable(animable, time_delta);
 		});
@@ -854,7 +829,7 @@ struct AnimationSceneImpl final : AnimationScene
 		updateAnimables(time_delta);
 		updatePropertyAnimators(time_delta);
 
-		JobSystem::forEach(m_animators.size(), 1, [&](i32 idx, i32){
+		jobs::forEach(m_animators.size(), 1, [&](i32 idx, i32){
 			updateAnimator(m_animators[idx], time_delta);
 		});
 
@@ -876,18 +851,18 @@ struct AnimationSceneImpl final : AnimationScene
 			blob.read(size);
 			if (type == set_input_type)
 			{
-				Anim::SetInputEvent event;
+				anim::SetInputEvent event;
 				blob.read(event);
 				Animator& ctrl = m_animators[m_animator_map[entity]];
 				if (ctrl.resource->isReady())
 				{
-					Anim::InputDecl& decl = ctrl.resource->m_inputs;
-					Anim::InputDecl::Input& input = decl.inputs[event.input_idx];
+					anim::InputDecl& decl = ctrl.resource->m_inputs;
+					anim::InputDecl::Input& input = decl.inputs[event.input_idx];
 					switch (input.type)
 					{
-						case Anim::InputDecl::BOOL: *(bool*)&ctrl.ctx->inputs[input.offset] = event.b_value; break;
-						case Anim::InputDecl::U32: *(u32*)&ctrl.ctx->inputs[input.offset] = event.i_value; break;
-						case Anim::InputDecl::FLOAT: *(float*)&ctrl.ctx->inputs[input.offset] = event.f_value; break;
+						case anim::InputDecl::BOOL: *(bool*)&ctrl.ctx->inputs[input.offset] = event.b_value; break;
+						case anim::InputDecl::U32: *(u32*)&ctrl.ctx->inputs[input.offset] = event.i_value; break;
+						case anim::InputDecl::FLOAT: *(float*)&ctrl.ctx->inputs[input.offset] = event.f_value; break;
 						default: ASSERT(false); break;
 					}
 				}
@@ -902,7 +877,7 @@ struct AnimationSceneImpl final : AnimationScene
 
 	PropertyAnimation* loadPropertyAnimation(const Path& path) const
 	{
-		if (!path.isValid()) return nullptr;
+		if (path.isEmpty()) return nullptr;
 		ResourceManagerHub& rm = m_engine.getResourceManager();
 		return rm.load<PropertyAnimation>(path);
 	}
@@ -915,10 +890,10 @@ struct AnimationSceneImpl final : AnimationScene
 	}
 
 
-	Anim::Controller* loadController(const Path& path) const
+	anim::Controller* loadController(const Path& path) const
 	{
 		ResourceManagerHub& rm = m_engine.getResourceManager();
-		return rm.load<Anim::Controller>(path);
+		return rm.load<anim::Controller>(path);
 	}
 
 
@@ -969,38 +944,27 @@ struct AnimationSceneImpl final : AnimationScene
 };
 
 
-AnimationScene* AnimationScene::create(Engine& engine, IPlugin& plugin, Universe& universe, IAllocator& allocator)
+UniquePtr<AnimationScene> AnimationScene::create(Engine& engine, IPlugin& plugin, Universe& universe, IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, AnimationSceneImpl)(engine, plugin, universe, allocator);
+	return UniquePtr<AnimationSceneImpl>::create(allocator, engine, plugin, universe, allocator);
 }
 
-
-void AnimationScene::destroy(AnimationScene& scene)
-{
-	AnimationSceneImpl& scene_impl = (AnimationSceneImpl&)scene;
-	LUMIX_DELETE(scene_impl.m_allocator, &scene_impl);
+void AnimationScene::reflect(Engine& engine) {
+	LUMIX_SCENE(AnimationSceneImpl, "animation")
+		.LUMIX_CMP(PropertyAnimator, "property_animator", "Animation / Property animator")
+			.LUMIX_PROP(PropertyAnimation, "Animation").resourceAttribute(PropertyAnimation::TYPE)
+			.prop<&AnimationScene::isPropertyAnimatorEnabled, &AnimationScene::enablePropertyAnimator>("Enabled")
+		.LUMIX_CMP(Animator, "animator", "Animation / Animator")
+			.function<(void (AnimationScene::*)(EntityRef, u32, u32))&AnimationScene::setAnimatorInput>("setU32Input", "AnimationScene::setAnimatorInput")
+			.function<(void (AnimationScene::*)(EntityRef, u32, float))&AnimationScene::setAnimatorInput>("setFloatInput", "AnimationScene::setAnimatorInput")
+			.function<(void (AnimationScene::*)(EntityRef, u32, bool))&AnimationScene::setAnimatorInput>("setBoolInput", "AnimationScene::setAnimatorInput")
+			.LUMIX_FUNC_EX(getAnimatorInputIndex, "getInputIndex")
+			.LUMIX_FUNC_EX(setAnimatorIK, "setIK")
+			.LUMIX_PROP(AnimatorSource, "Source").resourceAttribute(anim::Controller::TYPE)
+			.LUMIX_PROP(AnimatorDefaultSet, "Default set")
+		.LUMIX_CMP(Animable, "animable", "Animation / Animable")
+			.LUMIX_PROP(Animation, "Animation").resourceAttribute(Animation::TYPE)
+	;
 }
 
-
-void AnimationScene::registerLuaAPI(lua_State* L)
-{
-	#define REGISTER_FUNCTION(name) \
-	do {\
-		auto f = &LuaWrapper::wrapMethod<&AnimationSceneImpl::name>; \
-		LuaWrapper::createSystemFunction(L, "Animation", #name, f); \
-	} while(false) \
-
-	REGISTER_FUNCTION(getAnimationLength);
-	REGISTER_FUNCTION(setAnimatorU32Input);
-	REGISTER_FUNCTION(setAnimatorBoolInput);
-	REGISTER_FUNCTION(setAnimatorFloatInput);
-	REGISTER_FUNCTION(getAnimatorInputIndex);
-
-	#undef REGISTER_FUNCTION
-
-	LuaWrapper::createSystemFunction(L, "Animation", "setIK", &AnimationSceneImpl::setIK); \
-
-}
-
-
-}
+} // namespace Lumix

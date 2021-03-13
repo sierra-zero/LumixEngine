@@ -9,26 +9,29 @@
 #include "engine/os.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
+#include "engine/string.h"
 #include "engine/universe.h"
 #include "gui_scene.h"
 #include "gui_system.h"
+#include "renderer/draw2d.h"
 #include "renderer/font.h"
 #include "renderer/pipeline.h"
 #include "renderer/texture.h"
 #include "sprite.h"
+#include "imgui/IconsFontAwesome5.h"
 
 
 namespace Lumix
 {
 
 
-static const ComponentType GUI_CANVAS_TYPE = Reflection::getComponentType("gui_canvas");
-static const ComponentType GUI_BUTTON_TYPE = Reflection::getComponentType("gui_button");
-static const ComponentType GUI_RECT_TYPE = Reflection::getComponentType("gui_rect");
-static const ComponentType GUI_RENDER_TARGET_TYPE = Reflection::getComponentType("gui_render_target");
-static const ComponentType GUI_IMAGE_TYPE = Reflection::getComponentType("gui_image");
-static const ComponentType GUI_TEXT_TYPE = Reflection::getComponentType("gui_text");
-static const ComponentType GUI_INPUT_FIELD_TYPE = Reflection::getComponentType("gui_input_field");
+static const ComponentType GUI_CANVAS_TYPE = reflection::getComponentType("gui_canvas");
+static const ComponentType GUI_BUTTON_TYPE = reflection::getComponentType("gui_button");
+static const ComponentType GUI_RECT_TYPE = reflection::getComponentType("gui_rect");
+static const ComponentType GUI_RENDER_TARGET_TYPE = reflection::getComponentType("gui_render_target");
+static const ComponentType GUI_IMAGE_TYPE = reflection::getComponentType("gui_image");
+static const ComponentType GUI_TEXT_TYPE = reflection::getComponentType("gui_text");
+static const ComponentType GUI_INPUT_FIELD_TYPE = reflection::getComponentType("gui_input_field");
 static const float CURSOR_BLINK_PERIOD = 1.0f;
 static gpu::TextureHandle EMPTY_RENDER_TARGET = gpu::INVALID_TEXTURE;
 
@@ -48,7 +51,7 @@ struct GUIText
 				m_font = nullptr;
 			}
 			m_font_resource->getObserverCb().unbind<&GUIText::onFontLoaded>(this);
-			m_font_resource->getResourceManager().unload(*m_font_resource);
+			m_font_resource->decRefCount();
 		}
 		m_font_resource = res;
 		if (res) res->onLoaded<&GUIText::onFontLoaded>(this);
@@ -96,12 +99,7 @@ private:
 struct GUIButton
 {
 	u32 hovered_color = 0xffFFffFF;
-	OS::CursorType hovered_cursor = OS::CursorType::UNDEFINED;
-};
-
-
-struct GUICanvas {
-	EntityRef entity;
+	os::CursorType hovered_cursor = os::CursorType::UNDEFINED;
 };
 
 
@@ -115,7 +113,7 @@ struct GUIInputField
 struct GUIImage
 {
 	~GUIImage() {
-		if (sprite) sprite->getResourceManager().unload(*sprite);
+		if (sprite) sprite->decRefCount();
 	}
 
 	enum Flags
@@ -159,6 +157,10 @@ struct GUIRect
 
 struct GUISceneImpl final : GUIScene
 {
+	enum class Version : i32 {
+		CANVAS_3D,
+		LATEST
+	};
 	GUISceneImpl(GUISystem& system, Universe& context, IAllocator& allocator)
 		: m_allocator(allocator)
 		, m_universe(context)
@@ -167,6 +169,7 @@ struct GUISceneImpl final : GUIScene
 		, m_buttons(allocator)
 		, m_canvas(allocator)
 		, m_rect_hovered(allocator)
+		, m_draw_2d(allocator)
 		, m_rect_hovered_out(allocator)
 		, m_rect_mouse_down(allocator)
 		, m_unhandled_mouse_button(allocator)
@@ -174,36 +177,10 @@ struct GUISceneImpl final : GUIScene
 		, m_buttons_down_count(0)
 		, m_canvas_size(800, 600)
 	{
-		context.registerComponentType(GUI_RECT_TYPE
-			, this
-			, &GUISceneImpl::createRect
-			, &GUISceneImpl::destroyRect);
-		context.registerComponentType(GUI_IMAGE_TYPE
-			, this
-			, &GUISceneImpl::createImage
-			, &GUISceneImpl::destroyImage);
-		context.registerComponentType(GUI_RENDER_TARGET_TYPE
-			, this
-			, &GUISceneImpl::createRenderTarget
-			, &GUISceneImpl::destroyRenderTarget);
-		context.registerComponentType(GUI_INPUT_FIELD_TYPE
-			, this
-			, &GUISceneImpl::createInputField
-			, &GUISceneImpl::destroyInputField);
-		context.registerComponentType(GUI_TEXT_TYPE
-			, this
-			, &GUISceneImpl::createText
-			, &GUISceneImpl::destroyText);
-		context.registerComponentType(GUI_BUTTON_TYPE
-			, this
-			, &GUISceneImpl::createButton
-			, &GUISceneImpl::destroyButton);
-		context.registerComponentType(GUI_CANVAS_TYPE
-			, this
-			, &GUISceneImpl::createCanvas
-			, &GUISceneImpl::destroyCanvas);
 		m_font_manager = (FontManager*)system.getEngine().getResourceManager().get(FontResource::TYPE);
 	}
+	
+	i32 getVersion() const override { return (i32)Version::LATEST; }
 
 	void renderTextCursor(GUIRect& rect, Draw2D& draw, const Vec2& pos)
 	{
@@ -221,8 +198,7 @@ struct GUISceneImpl final : GUIScene
 			, 1);
 	}
 
-
-	void renderRect(GUIRect& rect, Pipeline& pipeline, const Rect& parent_rect, bool is_main)
+	void renderRect(GUIRect& rect, Draw2D& draw, const Rect& parent_rect, bool is_main)
 	{
 		if (!rect.flags.isSet(GUIRect::IS_VALID)) return;
 		if (!rect.flags.isSet(GUIRect::IS_ENABLED)) return;
@@ -232,7 +208,6 @@ struct GUISceneImpl final : GUIScene
 		float t = parent_rect.y + rect.top.points + parent_rect.h * rect.top.relative;
 		float b = parent_rect.y + rect.bottom.points + parent_rect.h * rect.bottom.relative;
 			 
-		Draw2D& draw = pipeline.getDraw2D();
 		if (rect.flags.isSet(GUIRect::IS_CLIP)) draw.pushClipRect({ l, t }, { r, b });
 
 		auto button_iter = m_buttons.find(rect.entity);
@@ -241,7 +216,7 @@ struct GUISceneImpl final : GUIScene
 		if (is_main && button_iter.isValid()) {
 			GUIButton& button = button_iter.value();
 			if (m_cursor_pos.x >= l && m_cursor_pos.x <= r && m_cursor_pos.y >= t && m_cursor_pos.y <= b) {
-				if (button.hovered_cursor != OS::CursorType::UNDEFINED && !m_cursor_set) {
+				if (button.hovered_cursor != os::CursorType::UNDEFINED && !m_cursor_set) {
 					m_cursor_type = button_iter.value().hovered_cursor;
 					m_cursor_set = true;
 				}
@@ -303,7 +278,7 @@ struct GUISceneImpl final : GUIScene
 			}
 		}
 
-		if (rect.render_target && rect.render_target->isValid())
+		if (rect.render_target && *rect.render_target)
 		{
 			draw.addImage(rect.render_target, { l, t }, { r, b }, {0, 0}, {1, 1}, Color::WHITE);
 		}
@@ -312,13 +287,13 @@ struct GUISceneImpl final : GUIScene
 			Font* font = rect.text->getFont();
 			if (font) {
 				const char* text_cstr = rect.text->text.c_str();
-				float font_size = (float)rect.text->getFontSize();
+				float ascender = getAscender(*font);
 				Vec2 text_size = measureTextA(*font, text_cstr, nullptr);
-				Vec2 text_pos(l, t + font_size);
+				Vec2 text_pos(l, t + ascender);
 
 				switch (rect.text->vertical_align) {
 					case TextVAlign::TOP: break;
-					case TextVAlign::MIDDLE: text_pos.y = (t + b + getAscender(*font) - getDescender(*font)) * 0.5f; break;
+					case TextVAlign::MIDDLE: text_pos.y = (t + b + ascender + getDescender(*font)) * 0.5f; break;
 					case TextVAlign::BOTTOM: text_pos.y = b + getDescender(*font); break;
 				}
 
@@ -339,7 +314,7 @@ struct GUISceneImpl final : GUIScene
 			auto iter = m_rects.find((EntityRef)child);
 			if (iter.isValid())
 			{
-				renderRect(*iter.value(), pipeline, { l, t, r - l, b - t }, is_main);
+				renderRect(*iter.value(), draw, { l, t, r - l, b - t }, is_main);
 			}
 			child = m_universe.getNextSibling((EntityRef)child);
 		}
@@ -348,17 +323,39 @@ struct GUISceneImpl final : GUIScene
 
 	IVec2 getCursorPosition() override { return m_cursor_pos; }
 
+	void draw3D(GUICanvas& canvas, Pipeline& pipeline) {
+		m_draw_2d.clear({2, 2});
+
+		EntityPtr child = m_universe.getFirstChild(canvas.entity);
+		while (child.isValid())
+		{
+			auto iter = m_rects.find((EntityRef)child);
+			if (iter.isValid())
+			{
+				renderRect(*iter.value(), m_draw_2d, { 0, 0, canvas.virtual_size.x, canvas.virtual_size.y }, false);
+			}
+			child = m_universe.getNextSibling((EntityRef)child);
+		}
+
+		pipeline.render3DUI(canvas.entity, m_draw_2d, canvas.virtual_size, canvas.orient_to_camera);
+	}
+
 	void render(Pipeline& pipeline, const Vec2& canvas_size, bool is_main) override {
 		m_canvas_size = canvas_size;
 		if (is_main) {
-			m_cursor_type = OS::CursorType::DEFAULT;
+			m_cursor_type = os::CursorType::DEFAULT;
 			m_cursor_set = false;
 		}
 		for (GUICanvas& canvas : m_canvas) {
-			auto iter = m_rects.find(canvas.entity);
-			if (iter.isValid()) {
-				GUIRect* r = iter.value();
-				renderRect(*r, pipeline, {0, 0, canvas_size.x, canvas_size.y}, is_main);
+			if (canvas.is_3d) {
+				draw3D(canvas, pipeline);
+			}
+			else {
+				auto iter = m_rects.find(canvas.entity);
+				if (iter.isValid()) {
+					GUIRect* r = iter.value();
+					renderRect(*r, pipeline.getDraw2D(), {0, 0, canvas_size.x, canvas_size.y}, is_main);
+				}
 			}
 		}
 	}
@@ -374,11 +371,11 @@ struct GUISceneImpl final : GUIScene
 		m_buttons[entity].hovered_color = RGBAVec4ToABGRu32(color);
 	}
 
-	OS::CursorType getButtonHoveredCursor(EntityRef entity) override {
+	os::CursorType getButtonHoveredCursor(EntityRef entity) override {
 		return m_buttons[entity].hovered_cursor;
 	}
 
-	void setButtonHoveredCursor(EntityRef entity, OS::CursorType cursor) override {
+	void setButtonHoveredCursor(EntityRef entity, os::CursorType cursor) override {
 		m_buttons[entity].hovered_cursor = cursor;
 	}
 
@@ -421,22 +418,22 @@ struct GUISceneImpl final : GUIScene
 		return image->sprite ? image->sprite->getPath() : Path();
 	}
 
+	GUICanvas& getCanvas(EntityRef entity) override {
+		return m_canvas[entity];
+	}
 
 	void setImageSprite(EntityRef entity, const Path& path) override
 	{
 		GUIImage* image = m_rects[entity]->image;
-		if (image->sprite)
-		{
-			image->sprite->getResourceManager().unload(*image->sprite);
+		if (image->sprite) {
+			image->sprite->decRefCount();
 		}
+
 		ResourceManagerHub& manager = m_system.getEngine().getResourceManager();
-		if (path.isValid())
-		{
-			image->sprite = manager.load<Sprite>(path);
-		}
-		else
-		{
+		if (path.isEmpty()) {
 			image->sprite = nullptr;
+		} else {
+			image->sprite = manager.load<Sprite>(path);
 		}
 	}
 
@@ -603,7 +600,7 @@ struct GUISceneImpl final : GUIScene
 	void setTextFontPath(EntityRef entity, const Path& path) override
 	{
 		GUIText* gui_text = m_rects[entity]->text;
-		FontResource* res = path.isValid() ? m_font_manager->getOwner().load<FontResource>(path) : nullptr;
+		FontResource* res = path.isEmpty() ? nullptr : m_font_manager->getOwner().load<FontResource>(path);
 		gui_text->setFontResource(res);
 	}
 
@@ -649,10 +646,12 @@ struct GUISceneImpl final : GUIScene
 	{
 		for (GUIRect* rect : m_rects)
 		{
-			LUMIX_DELETE(m_allocator, rect->input_field);
-			LUMIX_DELETE(m_allocator, rect->image);
-			LUMIX_DELETE(m_allocator, rect->text);
-			LUMIX_DELETE(m_allocator, rect);
+			if (rect->flags.isSet(GUIRect::IS_VALID)) {
+				LUMIX_DELETE(m_allocator, rect->input_field);
+				LUMIX_DELETE(m_allocator, rect->image);
+				LUMIX_DELETE(m_allocator, rect->text);
+				LUMIX_DELETE(m_allocator, rect);
+			}
 		}
 		m_rects.clear();
 		m_buttons.clear();
@@ -744,7 +743,7 @@ struct GUISceneImpl final : GUIScene
 						}
 						else
 						{
-							logError("GUI") << "Too many buttons pressed at once";
+							logError("Too many buttons pressed at once");
 						}
 					}
 				}
@@ -805,27 +804,27 @@ struct GUISceneImpl final : GUIScene
 
 		rect->input_field->anim = 0;
 
-		switch ((OS::Keycode)event.data.button.key_id)
+		switch ((os::Keycode)event.data.button.key_id)
 		{
-		case OS::Keycode::HOME: rect->input_field->cursor = 0; break;
-			case OS::Keycode::END: rect->input_field->cursor = rect->text->text.length(); break;
-			case OS::Keycode::BACKSPACE:
+		case os::Keycode::HOME: rect->input_field->cursor = 0; break;
+			case os::Keycode::END: rect->input_field->cursor = rect->text->text.length(); break;
+			case os::Keycode::BACKSPACE:
 				if (rect->text->text.length() > 0 && rect->input_field->cursor > 0)
 				{
 					rect->text->text.eraseAt(rect->input_field->cursor - 1);
 					--rect->input_field->cursor;
 				}
 				break;
-			case OS::Keycode::DEL:
+			case os::Keycode::DEL:
 				if (rect->input_field->cursor < rect->text->text.length())
 				{
 					rect->text->text.eraseAt(rect->input_field->cursor);
 				}
 				break;
-			case OS::Keycode::LEFT:
+			case os::Keycode::LEFT:
 				if (rect->input_field->cursor > 0) --rect->input_field->cursor;
 				break;
-			case OS::Keycode::RIGHT:
+			case os::Keycode::RIGHT:
 				if (rect->input_field->cursor < rect->text->text.length()) ++rect->input_field->cursor;
 				break;
 		}
@@ -864,7 +863,7 @@ struct GUISceneImpl final : GUIScene
 				case InputSystem::Event::BUTTON:
 					if (event.device->type == InputSystem::Device::MOUSE)
 					{
-						if (event.data.button.key_id != (u32)OS::MouseButton::LEFT) break;
+						if (event.data.button.key_id != (u32)os::MouseButton::LEFT) break;
 						if (event.data.button.down)
 						{
 							m_mouse_down_pos.x = event.data.button.x;
@@ -976,7 +975,7 @@ struct GUISceneImpl final : GUIScene
 			iter = m_rects.find(entity);
 		}
 		GUIImage* image = iter.value()->image;
-		GUIButton& button = m_buttons.insert(entity, GUIButton());
+		GUIButton& button = m_buttons.insert(entity);
 		if (image) {
 			button.hovered_color = image->color;
 		}
@@ -986,7 +985,7 @@ struct GUISceneImpl final : GUIScene
 
 	void createCanvas(EntityRef entity)
 	{
-		GUICanvas& canvas = m_canvas.insert(entity, {});
+		GUICanvas& canvas = m_canvas.insert(entity);
 		canvas.entity = entity;
 		m_universe.onComponentCreated(entity, GUI_CANVAS_TYPE, this);
 	}
@@ -1145,12 +1144,15 @@ struct GUISceneImpl final : GUIScene
 		serializer.write(m_canvas.size());
 		
 		for (GUICanvas& c : m_canvas) {
-			serializer.write(c);
+			serializer.write(c.entity);
+			serializer.write(c.is_3d);
+			serializer.write(c.orient_to_camera);
+			serializer.write(c.virtual_size);
 		}
 	}
 
 
-	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map) override
+	void deserialize(InputMemoryStream& serializer, const EntityMap& entity_map, i32 version) override
 	{
 		u32 count = serializer.read<u32>();
 		for (u32 i = 0; i < count; ++i)
@@ -1174,7 +1176,6 @@ struct GUISceneImpl final : GUIScene
 			serializer.read(rect->right);
 			serializer.read(rect->bottom);
 			serializer.read(rect->left);
-			m_rects.insert(rect->entity, rect);
 			if (rect->flags.isSet(GUIRect::IS_VALID)) {
 				m_universe.onComponentCreated(rect->entity, GUI_RECT_TYPE, this);
 			}
@@ -1228,7 +1229,7 @@ struct GUISceneImpl final : GUIScene
 			EntityRef e;
 			serializer.read(e);
 			e = entity_map.get(e);
-			GUIButton& button = m_buttons.insert(e, GUIButton());
+			GUIButton& button = m_buttons.insert(e);
 			serializer.read(button.hovered_color);
 			serializer.read(button.hovered_cursor);
 			m_universe.onComponentCreated(e, GUI_BUTTON_TYPE, this);
@@ -1237,7 +1238,13 @@ struct GUISceneImpl final : GUIScene
 		count = serializer.read<u32>();
 		for (u32 i = 0; i < count; ++i) {
 			GUICanvas canvas;
-			serializer.read(canvas);
+			serializer.read(canvas.entity);
+			serializer.read(canvas.is_3d);
+			if (version > (i32)Version::CANVAS_3D) {
+				serializer.read(canvas.orient_to_camera);
+				serializer.read(canvas.virtual_size);
+			}
+
 			canvas.entity = entity_map.get(canvas.entity);
 			m_canvas.insert(canvas.entity, canvas);
 			
@@ -1245,6 +1252,7 @@ struct GUISceneImpl final : GUIScene
 		}
 	}
 	
+	GUISystem* getSystem() override { return &m_system; }
 
 	void setRenderTarget(EntityRef entity, gpu::TextureHandle* texture_handle) override
 	{
@@ -1271,7 +1279,7 @@ struct GUISceneImpl final : GUIScene
 	u32 m_buttons_down_count;
 	EntityPtr m_focused_entity = INVALID_ENTITY;
 	IVec2 m_cursor_pos = {-10000, -10000};
-	OS::CursorType m_cursor_type = OS::CursorType::DEFAULT;
+	os::CursorType m_cursor_type = os::CursorType::DEFAULT;
 	bool m_cursor_set;
 	FontManager* m_font_manager = nullptr;
 	Vec2 m_canvas_size;
@@ -1281,21 +1289,96 @@ struct GUISceneImpl final : GUIScene
 	DelegateList<void(EntityRef)> m_rect_hovered_out;
 	DelegateList<void(EntityRef, float, float)> m_rect_mouse_down;
 	DelegateList<void(bool, i32, i32)> m_unhandled_mouse_button;
+	Draw2D m_draw_2d;
 };
 
 
-GUIScene* GUIScene::createInstance(GUISystem& system,
+UniquePtr<GUIScene> GUIScene::createInstance(GUISystem& system,
 	Universe& universe,
 	IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, GUISceneImpl)(system, universe, allocator);
+	return UniquePtr<GUISceneImpl>::create(allocator, system, universe, allocator);
 }
 
+void GUIScene::reflect() {
+	struct TextHAlignEnum : reflection::EnumAttribute {
+		u32 count(ComponentUID cmp) const override { return 3; }
+		const char* name(ComponentUID cmp, u32 idx) const override {
+			switch((GUIScene::TextHAlign)idx) {
+				case GUIScene::TextHAlign::LEFT: return "Left";
+				case GUIScene::TextHAlign::RIGHT: return "Right";
+				case GUIScene::TextHAlign::CENTER: return "Center";
+				default: ASSERT(false); return "N/A";
+			}
+		}
+	};
 
-void GUIScene::destroyInstance(GUIScene* scene)
-{
-	LUMIX_DELETE(static_cast<GUISceneImpl*>(scene)->m_allocator, scene);
+	struct TextVAlignEnum : reflection::EnumAttribute {
+		u32 count(ComponentUID cmp) const override { return 3; }
+		const char* name(ComponentUID cmp, u32 idx) const override {
+			switch((GUIScene::TextVAlign)idx) {
+				case GUIScene::TextVAlign::TOP: return "Top";
+				case GUIScene::TextVAlign::MIDDLE: return "Middle";
+				case GUIScene::TextVAlign::BOTTOM: return "Bottom";
+				default: ASSERT(false); return "N/A";
+			}
+		}
+	};
+		
+	struct CursorEnum : reflection::EnumAttribute {
+		u32 count(ComponentUID cmp) const override { return 7; }
+		const char* name(ComponentUID cmp, u32 idx) const override {
+			switch((os::CursorType)idx) {
+				case os::CursorType::UNDEFINED: return "Ignore";
+				case os::CursorType::DEFAULT: return "Default";
+				case os::CursorType::LOAD: return "Load";
+				case os::CursorType::SIZE_NS: return "Size NS";
+				case os::CursorType::SIZE_NWSE: return "Size NWSE";
+				case os::CursorType::SIZE_WE: return "Size WE";
+				case os::CursorType::TEXT_INPUT: return "Text input";
+				default: ASSERT(false); return "N/A";
+			}
+		}
+	};
+
+	LUMIX_SCENE(GUISceneImpl, "gui")
+		.LUMIX_FUNC(GUIScene::getRectAt)
+		.LUMIX_FUNC(GUIScene::isOver)
+		.LUMIX_FUNC(GUIScene::getSystem)
+		.LUMIX_CMP(RenderTarget, "gui_render_target", "GUI / Render taget")
+		.LUMIX_CMP(Text, "gui_text", "GUI / Text")
+			.icon(ICON_FA_FONT)
+			.LUMIX_PROP(Text, "Text").multilineAttribute()
+			.LUMIX_PROP(TextFontPath, "Font").resourceAttribute(FontResource::TYPE)
+			.LUMIX_PROP(TextFontSize, "Font Size")
+			.LUMIX_ENUM_PROP(TextHAlign, "Horizontal align").attribute<TextHAlignEnum>()
+			.LUMIX_ENUM_PROP(TextVAlign, "Vertical align").attribute<TextVAlignEnum>()
+			.LUMIX_PROP(TextColorRGBA, "Color").colorAttribute()
+		.LUMIX_CMP(InputField, "gui_input_field", "GUI / Input field").icon(ICON_FA_KEYBOARD)
+		.LUMIX_CMP(Canvas, "gui_canvas", "GUI / Canvas")
+			.var_prop<&GUIScene::getCanvas, &GUICanvas::is_3d>("Is 3D")
+			.var_prop<&GUIScene::getCanvas, &GUICanvas::orient_to_camera>("Orient to camera")
+			.var_prop<&GUIScene::getCanvas, &GUICanvas::virtual_size>("Virtual size")
+		.LUMIX_CMP(Button, "gui_button", "GUI / Button")
+			.LUMIX_PROP(ButtonHoveredColorRGBA, "Hovered color").colorAttribute()
+			.LUMIX_ENUM_PROP(ButtonHoveredCursor, "Cursor").attribute<CursorEnum>()
+		.LUMIX_CMP(Image, "gui_image", "GUI / Image")
+			.icon(ICON_FA_IMAGE)
+			.prop<&GUIScene::isImageEnabled, &GUIScene::enableImage>("Enabled")
+			.LUMIX_PROP(ImageColorRGBA, "Color").colorAttribute()
+			.LUMIX_PROP(ImageSprite, "Sprite").resourceAttribute(Sprite::TYPE)
+		.LUMIX_CMP(Rect, "gui_rect", "GUI / Rect")
+			.prop<&GUIScene::isRectEnabled, &GUIScene::enableRect>("Enabled")
+			.LUMIX_PROP(RectClip, "Clip content")
+			.LUMIX_PROP(RectTopPoints, "Top Points")
+			.LUMIX_PROP(RectTopRelative, "Top Relative")
+			.LUMIX_PROP(RectRightPoints, "Right Points")
+			.LUMIX_PROP(RectRightRelative, "Right Relative")
+			.LUMIX_PROP(RectBottomPoints, "Bottom Points")
+			.LUMIX_PROP(RectBottomRelative, "Bottom Relative")
+			.LUMIX_PROP(RectLeftPoints, "Left Points")
+			.LUMIX_PROP(RectLeftRelative, "Left Relative")
+	;
 }
-
 
 } // namespace Lumix

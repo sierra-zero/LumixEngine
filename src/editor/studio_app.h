@@ -2,8 +2,6 @@
 
 
 #include "engine/lumix.h"
-#include "engine/os.h"
-#include "engine/array.h"
 
 
 struct ImFont;
@@ -11,7 +9,6 @@ struct ImFont;
 #ifdef STATIC_PLUGINS
 	#define LUMIX_STUDIO_ENTRY(plugin_name) \
 		extern "C" Lumix::StudioApp::IPlugin* setStudioApp_##plugin_name(Lumix::StudioApp& app); \
-		extern "C" { Lumix::StudioApp::StaticPluginRegister s_##plugin_name##_editor_register(#plugin_name, setStudioApp_##plugin_name); } \
 		extern "C" Lumix::StudioApp::IPlugin* setStudioApp_##plugin_name(Lumix::StudioApp& app)
 #else
 	#define LUMIX_STUDIO_ENTRY(plugin_name) \
@@ -23,14 +20,18 @@ namespace Lumix
 {
 
 
+template <typename T> struct Array;
 struct Action;
 struct ComponentUID;
 struct ResourceType;
 struct Vec2;
 namespace Gizmo { struct Config; }
+namespace os {
+	enum class MouseButton;
+	struct Event;
+}
 
-
-struct LUMIX_EDITOR_API StudioApp : OS::Interface
+struct LUMIX_EDITOR_API StudioApp
 {
 	struct IPlugin {
 		virtual ~IPlugin() {}
@@ -45,7 +46,7 @@ struct LUMIX_EDITOR_API StudioApp : OS::Interface
 		virtual ~MousePlugin() {}
 
 		virtual bool onMouseDown(UniverseView& view, int x, int y) { return false; }
-		virtual void onMouseUp(UniverseView& view, int x, int y, OS::MouseButton button) {}
+		virtual void onMouseUp(UniverseView& view, int x, int y, os::MouseButton button) {}
 		virtual void onMouseMove(UniverseView& view, int x, int y, int rel_x, int rel_y) {}
 	};
 
@@ -79,22 +80,10 @@ struct LUMIX_EDITOR_API StudioApp : OS::Interface
 		char label[50];
 	};
 
-	struct LUMIX_EDITOR_API StaticPluginRegister
-	{
-		using Creator = IPlugin* (*)(StudioApp& app);
-		StaticPluginRegister(const char* name, Creator creator);
-
-		static void create(StudioApp& app);
-
-		StaticPluginRegister* next;
-		Creator creator;
-		const char* name;
-	};
-
 	static StudioApp* create();
 	static void destroy(StudioApp& app);
 
-	virtual IAllocator& getAllocator() = 0;
+	virtual struct IAllocator& getAllocator() = 0;
 	virtual struct Engine& getEngine() = 0;
 	virtual void run() = 0;
 	virtual struct PropertyGrid& getPropertyGrid() = 0;
@@ -112,14 +101,11 @@ struct LUMIX_EDITOR_API StudioApp : OS::Interface
 	virtual Span<MousePlugin*> getMousePlugins() = 0;
 	virtual const char* getComponentTypeName(ComponentType cmp_type) const = 0;
 	virtual const char* getComponentIcon(ComponentType cmp_type) const = 0;
-	virtual void registerComponent(const char* icon, const char* id, const char* label) = 0;
 	virtual void registerComponent(const char* icon, const char* id, IAddComponentPlugin& plugin) = 0;
-	virtual void registerComponent(const char* icon, const char* id, const char* label, ResourceType resource_type, const char* property) = 0;
 	virtual const AddCmpTreeNode& getAddComponentTreeRoot() const = 0;
 	virtual int getExitCode() const = 0;
 	virtual void runScript(const char* src, const char* script_name) = 0;
 	virtual const Array<Action*>& getActions() = 0;
-	virtual Array<Action*>& getToolbarActions() = 0;
 	virtual void addAction(Action* action) = 0;
 	virtual void removeAction(Action* action) = 0;
 	virtual void addWindowAction(Action* action) = 0;
@@ -136,7 +122,7 @@ struct LUMIX_EDITOR_API StudioApp : OS::Interface
 	virtual void setCursorCaptured(bool captured) = 0;
 	virtual void saveSettings() = 0;
 
-	virtual const OS::Event* getEvents() const = 0;
+	virtual const os::Event* getEvents() const = 0;
 	virtual int getEventsCount() const = 0;
 	virtual ~StudioApp() {}
 	virtual ImFont* getBoldFont() = 0;

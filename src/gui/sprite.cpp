@@ -3,6 +3,7 @@
 #include "engine/lua_wrapper.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "renderer/texture.h"
 
 
@@ -24,24 +25,21 @@ void Sprite::unload()
 {
 	if (!m_texture) return;
 	
-	m_texture->getResourceManager().unload(*m_texture);
+	m_texture->decRefCount();
 	m_texture = nullptr;
 }
 
 
 void Sprite::setTexture(const Path& path)
 {
-	if (m_texture)
-	{
-		m_texture->getResourceManager().unload(*m_texture);
+	if (m_texture) {
+		m_texture->decRefCount();
 	}
-	if (path.isValid())
-	{
-		m_texture = (Texture*)getResourceManager().getOwner().load<Texture>(path);
-	}
-	else
-	{
+
+	if (path.isEmpty()) {
 		m_texture = nullptr;
+	} else {
+		m_texture = (Texture*)getResourceManager().getOwner().load<Texture>(path);
 	}
 }
 

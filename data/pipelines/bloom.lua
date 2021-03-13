@@ -9,7 +9,7 @@ local state = {
 }
 
 function blurUpscale(env, buffer, smaller_buffer, format, w, h, tmp_rb_dbg_name) 
-	local blur_buf = env.createRenderbuffer(w, h, format, tmp_rb_dbg_name)
+	local blur_buf = env.createRenderbuffer { width = w, height = h, format = format, debug_name = tmp_rb_dbg_name }
 	env.setRenderTargets(blur_buf)
 	env.drawcallUniforms(1.0 / w, 1.0 / h, 0, 0)
 	env.viewport(0, 0, w, h)
@@ -27,7 +27,7 @@ function blurUpscale(env, buffer, smaller_buffer, format, w, h, tmp_rb_dbg_name)
 end
 
 function blur(env, buffer, format, w, h, tmp_rb_dbg_name) 
-	local blur_buf = env.createRenderbuffer(w, h, format, tmp_rb_dbg_name)
+	local blur_buf = env.createRenderbuffer { width = w, height = h, format = format, debug_name = tmp_rb_dbg_name }
 	env.setRenderTargets(blur_buf)
 	env.drawcallUniforms(1.0 / w, 1.0 / h, 0, 0)
 	env.viewport(0, 0, w, h)
@@ -45,7 +45,7 @@ function blur(env, buffer, format, w, h, tmp_rb_dbg_name)
 end
 
 function downscale(env, big, w, h)
-	local small = env.createRenderbuffer(w, h, "rgba16f", "bloom_downscaled")
+	local small = env.createRenderbuffer { width = w, height = h, format = "rgba16f", debug_name = "bloom_downscaled" }
 	env.setRenderTargets(small)
 	env.viewport(0, 0, w, h)
 	env.drawArray(0
@@ -69,15 +69,17 @@ function autoexposure(env, hdr_buffer)
 		env.lum_buf = env.createBuffer(2048);
 	end
 	
-	env.bindShaderBuffer(env.lum_buf, 1)
+	env.setRenderTargets()
+
+	env.bindShaderBuffer(env.lum_buf, 1, true)
 	env.dispatch(env.avg_luminance_shader, 256, 1, 1, "PASS0");
 
-	env.bindRenderbuffers({ hdr_buffer }, 0)
-	env.bindShaderBuffer(env.lum_buf, 1)
+	env.bindTextures({ hdr_buffer }, 0)
+	env.bindShaderBuffer(env.lum_buf, 1, true)
 	env.drawcallUniforms(env.viewport_w, env.viewport_h, accomodation_speed) 
 	env.dispatch(env.avg_luminance_shader, (env.viewport_w + 15) / 16, (env.viewport_h + 15) / 16, 1);
 
-	env.bindShaderBuffer(env.lum_buf, 1)
+	env.bindShaderBuffer(env.lum_buf, 1, true)
 	env.dispatch(env.avg_luminance_shader, 256, 1, 1, "PASS2");
 
 	env.endBlock()
@@ -85,14 +87,13 @@ end
 
 function tonemap(env, hdr_buffer)
 	env.beginBlock("tonemap")
-	local rb
+	local format = "rgba16f"
 	if env.APP ~= nil or env.PREVIEW ~= nil or env.screenshot_request == 1 then
-		rb = env.createRenderbuffer(env.viewport_w, env.viewport_h, "rgba8", "tonemap_bloom")
-	else
-		rb = env.createRenderbuffer(env.viewport_w, env.viewport_h, "rgba16f", "tonemap_bloom")
+		format = "rgba8"
 	end
+	local rb = env.createRenderbuffer { width = env.viewport_w, height = env.viewport_h, format = format, debug_name = "tonemap_bloom" }
 	env.setRenderTargets(rb)
-	env.bindShaderBuffer(env.lum_buf, 5, 2048)
+	env.bindShaderBuffer(env.lum_buf, 5, false)
 	env.drawArray(0, 3, env.bloom_tonemap_shader
 		, { hdr_buffer }
 		, { depth_test = false }
@@ -101,9 +102,9 @@ function tonemap(env, hdr_buffer)
 	return rb
 end
 
-function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer_depth, shadowmap)
-	env.custom_tonemap = true
+function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer2, gbuffer_depth, shadowmap)
 	if not enabled then return hdr_buffer end
+	env.custom_tonemap = true
 	if transparent_phase == "tonemap" then return tonemap(env, hdr_buffer) end
 	if transparent_phase ~= "post" then return hdr_buffer end
 	
@@ -122,12 +123,12 @@ function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbu
 
 	if not only_autoexposure then
 		env.beginBlock("bloom")
-		local bloom_rb = env.createRenderbuffer(0.5 * env.viewport_w, 0.5 * env.viewport_h, "rgba16f", "bloom")
+		local bloom_rb = env.createRenderbuffer { width = 0.5 * env.viewport_w, height = 0.5 * env.viewport_h, format = "rgba16f", debug_name = "bloom" }
 	
 		env.setRenderTargets(bloom_rb)
 		env.viewport(0, 0, 0.5 * env.viewport_w, 0.5 * env.viewport_h)
 		env.drawcallUniforms(luma_limit)
-		env.bindShaderBuffer(env.lum_buf, 5, 2048)
+		env.bindShaderBuffer(env.lum_buf, 5, false)
 		env.drawArray(0
 			, 3
 			, env.bloom_shader

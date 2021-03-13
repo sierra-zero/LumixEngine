@@ -76,7 +76,7 @@ function setDrawcallUniforms(env, x, y, z)
 	)
 end
 
-function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer_depth, shadowmap)
+function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer2, gbuffer_depth, shadowmap)
 	if not enabled then return hdr_buffer end
 	if transparent_phase ~= "pre" then return hdr_buffer end
 	env.beginBlock("atmo")
@@ -86,8 +86,8 @@ function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbu
 		env.clouds_noise_shader = env.preloadShader("pipelines/clouds_noise.shd")
 		env.atmo_scattering_shader = env.preloadShader("pipelines/atmo_scattering.shd")
 		env.atmo_optical_depth_shader = env.preloadShader("pipelines/atmo_optical_depth.shd")
-		env.inscatter_precomputed = env.createTexture2D(64, 128, "rgba32f")
-		env.opt_depth_precomputed = env.createTexture2D(128, 128, "rg32f")
+		env.inscatter_precomputed = env.createTexture2D(64, 128, "rgba32f", "inscatter_precomputed")
+		env.opt_depth_precomputed = env.createTexture2D(128, 128, "rg32f", "opt_depth_precomputed")
 		env.clouds_noise_precomputed = env.createTexture3D(128, 128, 128, "rgba32f", "cloud_noise")
 	end
 	env.setRenderTargetsReadonlyDS(hdr_buffer, gbuffer_depth)
@@ -126,13 +126,12 @@ function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbu
 	
 	setDrawcallUniforms(env, 64, 128, 1)
 	env.bindImageTexture(env.inscatter_precomputed, 0)
-	env.bindRawTexture(env.opt_depth_precomputed, 1)
+	env.bindTextures({env.opt_depth_precomputed}, 1)
 	env.beginBlock("precompute_inscatter")
 	env.dispatch(env.atmo_scattering_shader, 64 / 16, 128 / 16, 1)
 	env.endBlock()
 	
-	env.bindRawTexture(env.inscatter_precomputed, 2);
-	env.bindRawTexture(env.opt_depth_precomputed, 3);
+	env.bindTextures({env.inscatter_precomputed, env.opt_depth_precomputed}, 2);
 	env.drawArray(0, 3, env.atmo_shader, { gbuffer_depth, shadowmap }, state)
 	
 	if enable_clouds then
@@ -148,8 +147,7 @@ function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbu
 		env.drawcallUniforms(
 			cloud_param0, cloud_param1, cloud_param2, cloud_param3
 		)
-		env.bindRawTexture(env.inscatter_precomputed, 1);
-		env.bindRawTexture(env.clouds_noise_precomputed, 2);
+		env.bindTextures({env.inscatter_precomputed, env.clouds_noise_precomputed}, 1);
 		env.drawArray(0, 3, env.clouds_shader, { gbuffer_depth }, clouds_state)
 		env.endBlock()
 	end

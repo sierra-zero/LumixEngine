@@ -2,16 +2,21 @@
 
 
 #include "engine/plugin.h"
-
+#include "renderer/gpu/gpu.h"
 
 namespace Lumix
 {
 
-namespace gpu { struct TextureHandle; }
-namespace OS { enum class CursorType : u32; }
+namespace os { enum class CursorType : u32; }
 
 template <typename T> struct DelegateList;
 
+struct GUICanvas {
+	EntityRef entity;
+	bool is_3d = false;
+	bool orient_to_camera = true;
+	Vec2 virtual_size = Vec2(1000);
+};
 
 struct GUIScene : IScene
 {
@@ -34,13 +39,14 @@ struct GUIScene : IScene
 		float x, y, w, h;
 	};
 
-	static GUIScene* createInstance(struct GUISystem& system,
+	static UniquePtr<GUIScene> createInstance(struct GUISystem& system,
 		Universe& universe,
 		struct IAllocator& allocator);
-	static void destroyInstance(GUIScene* scene);
+	static void reflect();
 
 	virtual void render(struct Pipeline& pipeline, const struct Vec2& canvas_size, bool is_main) = 0;
 	virtual IVec2 getCursorPosition() = 0;
+	virtual GUISystem* getSystem() = 0;
 
 	virtual bool hasGUI(EntityRef entity) const = 0;
 	virtual Rect getRectEx(EntityPtr entity, const Vec2& canvas_size) const = 0;
@@ -75,8 +81,8 @@ struct GUIScene : IScene
 
 	virtual Vec4 getButtonHoveredColorRGBA(EntityRef entity) = 0;
 	virtual void setButtonHoveredColorRGBA(EntityRef entity, const Vec4& color) = 0;
-	virtual OS::CursorType getButtonHoveredCursor(EntityRef entity) = 0;
-	virtual void setButtonHoveredCursor(EntityRef entity, OS::CursorType cursor) = 0;
+	virtual os::CursorType getButtonHoveredCursor(EntityRef entity) = 0;
+	virtual void setButtonHoveredCursor(EntityRef entity, os::CursorType cursor) = 0;
 
 	virtual void enableImage(EntityRef entity, bool enable) = 0;
 	virtual bool isImageEnabled(EntityRef entity) = 0;
@@ -84,6 +90,8 @@ struct GUIScene : IScene
 	virtual void setImageColorRGBA(EntityRef entity, const Vec4& color) = 0;
 	virtual struct Path getImageSprite(EntityRef entity) = 0;
 	virtual void setImageSprite(EntityRef entity, const Path& path) = 0;
+
+	virtual GUICanvas& getCanvas(EntityRef entity) = 0;
 
 	virtual void setText(EntityRef entity, const char* text) = 0;
 	virtual const char* getText(EntityRef entity) = 0;

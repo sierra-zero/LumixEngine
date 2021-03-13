@@ -28,7 +28,6 @@ Animation::Animation(const Path& path, ResourceManager& resource_manager, IAlloc
 	, m_mem(allocator)
 	, m_translations(allocator)
 	, m_rotations(allocator)
-	, m_root_motion_bone_idx(-1)
 {
 }
 
@@ -254,11 +253,10 @@ bool Animation::load(u64 mem_size, const u8* mem)
 	InputMemoryStream file(mem, mem_size);
 	file.read(&header, sizeof(header));
 	if (header.magic != HEADER_MAGIC) {
-		logError("Animation") << getPath() << " is not an animation file";
+		logError("Invalid animation file ", getPath());
 		return false;
 	}
 
-	file.read(&m_root_motion_bone_idx, sizeof(m_root_motion_bone_idx));
 	m_length = header.length;
 	m_frame_count = header.frame_count;
 	u32 translations_count;

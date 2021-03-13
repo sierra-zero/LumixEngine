@@ -3,8 +3,6 @@
 
 #include "engine/allocator.h"
 #include "engine/lumix.h"
-#include "engine/math.h"
-#include "engine/string.h"
 
 
 namespace Lumix
@@ -203,6 +201,22 @@ public:
 		init(size, true);
 	}
 
+	HashMap(HashMap&& rhs)
+		: m_allocator(rhs.m_allocator)
+	{
+		m_keys = rhs.m_keys;
+		m_values = rhs.m_values;
+		m_capacity = rhs.m_capacity;
+		m_size = rhs.m_size;
+		m_mask = rhs.m_mask;
+		
+		rhs.m_keys = nullptr;
+		rhs.m_values = nullptr;
+		rhs.m_capacity = 0;
+		rhs.m_size = 0;
+		rhs.m_mask = 0;
+	}
+
 	~HashMap()
 	{
 		for(u32 i = 0, c = m_capacity; i < c; ++i) {
@@ -215,6 +229,8 @@ public:
 		m_allocator.deallocate(m_keys);
 		m_allocator.deallocate(m_values);
 	}
+
+	void operator =(HashMap&& rhs) = delete;
 
 	iterator begin() {
 		for (u32 i = 0, c = m_capacity; i < c; ++i) {
@@ -266,7 +282,12 @@ public:
 		return m_values[pos];
 	}
 
-	Value& insert(const Key& key, Value&& value) {
+	Value& insert(const Key& key) {
+		auto iter = insert(key, {});
+		return iter.value();
+	}
+
+	iterator insert(const Key& key, Value&& value) {
 		if (m_size >= m_capacity * 3 / 4) {
 			grow((m_capacity << 1) < 8 ? 8 : m_capacity << 1);
 		}
@@ -279,11 +300,11 @@ public:
 		}
 
 		new (NewPlaceholder(), m_keys[pos].key_mem) Key(key);
-		new (NewPlaceholder(), &m_values[pos]) Value(value);
+		new (NewPlaceholder(), &m_values[pos]) Value(static_cast<Value&&>(value));
 		++m_size;
 		m_keys[pos].valid = true;
 
-		return m_values[pos];
+		return { this, pos };
 	}
 
 	iterator insert(const Key& key, const Value& value) {
@@ -357,6 +378,24 @@ public:
 	}
 
 private:
+	template <typename T>
+	void swap(T& a, T& b) {
+		T tmp = static_cast<T&&>(a);
+		a = static_cast<T&&>(b);
+		b = static_cast<T&&>(tmp);
+	}
+
+	static u32 nextPow2(u32 v) {
+		v--;
+		v |= v >> 1;
+		v |= v >> 2;
+		v |= v >> 4;
+		v |= v >> 8;
+		v |= v >> 16;
+		v++;
+		return v;
+	}
+
 	void grow(u32 new_capacity) {
 		HashMap<Key, Value, Hasher> tmp(new_capacity, m_allocator);
 		if (m_size > 0) {
@@ -418,7 +457,8 @@ private:
 	}
 
 	void init(u32 capacity, bool all_invalid) {
-		ASSERT(isPowOfTwo(capacity));
+		const bool is_pow_2 = capacity && !(capacity & (capacity - 1));
+		ASSERT(is_pow_2);
 		m_size = 0;
 		m_mask = capacity - 1;
 		m_keys = (Slot*)m_allocator.allocate(sizeof(Slot) * (capacity + 1));

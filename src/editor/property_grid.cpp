@@ -21,7 +21,8 @@
 namespace Lumix
 {
 
-static const ComponentType GUI_RECT_TYPE = Reflection::getComponentType("gui_rect");
+static const ComponentType GUI_RECT_TYPE = reflection::getComponentType("gui_rect");
+static const ComponentType GUI_CANVAS_TYPE = reflection::getComponentType("gui_canvas");
 
 
 PropertyGrid::PropertyGrid(StudioApp& app)
@@ -41,7 +42,7 @@ PropertyGrid::~PropertyGrid()
 }
 
 
-struct GridUIVisitor final : Reflection::IPropertyVisitor
+struct GridUIVisitor final : reflection::IPropertyVisitor
 {
 	GridUIVisitor(StudioApp& app, int index, const Array<EntityRef>& entities, ComponentType cmp_type, WorldEditor& editor)
 		: m_entities(entities)
@@ -69,33 +70,37 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 		bool is_color = false;
 		bool is_radians = false;
 		bool is_multiline = false;
+		bool no_ui = false;
 		ResourceType resource_type;
 	};
 
 	template <typename T>
-	static Attributes getAttributes(const Reflection::Property<T>& prop)
+	static Attributes getAttributes(const reflection::Property<T>& prop)
 	{
 		Attributes attrs;
-		for (const Reflection::IAttribute* attr : prop.getAttributes()) {
+		for (const reflection::IAttribute* attr : prop.attributes) {
 			switch (attr->getType()) {
-				case Reflection::IAttribute::RADIANS:
+				case reflection::IAttribute::RADIANS:
 					attrs.is_radians = true;
 					break;
-				case Reflection::IAttribute::COLOR:
+				case reflection::IAttribute::NO_UI:
+					attrs.no_ui = true;
+					break;
+				case reflection::IAttribute::COLOR:
 					attrs.is_color = true;
 					break;
-				case Reflection::IAttribute::MULTILINE:
+				case reflection::IAttribute::MULTILINE:
 					attrs.is_multiline = true;
 					break;
-				case Reflection::IAttribute::MIN:
-					attrs.min = ((Reflection::MinAttribute&)*attr).min;
+				case reflection::IAttribute::MIN:
+					attrs.min = ((reflection::MinAttribute&)*attr).min;
 					break;
-				case Reflection::IAttribute::CLAMP:
-					attrs.min = ((Reflection::ClampAttribute&)*attr).min;
-					attrs.max = ((Reflection::ClampAttribute&)*attr).max;
+				case reflection::IAttribute::CLAMP:
+					attrs.min = ((reflection::ClampAttribute&)*attr).min;
+					attrs.max = ((reflection::ClampAttribute&)*attr).max;
 					break;
-				case Reflection::IAttribute::RESOURCE:
-					attrs.resource_type = ((Reflection::ResourceAttribute&)*attr).type;
+				case reflection::IAttribute::RESOURCE:
+					attrs.resource_type = ((reflection::ResourceAttribute&)*attr).resource_type;
 					break;
 			}
 		}
@@ -103,90 +108,92 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 	template <typename T>
-	void dynamicProperty(const ComponentUID& cmp, const Reflection::IDynamicProperties& prop, u32 prop_index) {
-		struct : Reflection::Property<T> {
-			Span<const Reflection::IAttribute* const> getAttributes() const override { return {}; }
+	void dynamicProperty(const ComponentUID& cmp, const reflection::DynamicProperties& prop, u32 prop_index) {
+		struct Prop : reflection::Property<T> {
+			Prop(IAllocator& allocator) : reflection::Property<T>(allocator) {}
 
-			T get(ComponentUID cmp, int array_index) const override {
-				return Reflection::get<T>(prop->getValue(cmp, array_index, index));
+			T get(ComponentUID cmp, u32 array_index) const override {
+				return reflection::get<T>(prop->getValue(cmp, array_index, index));
 			}
 
-			void set(ComponentUID cmp, int array_index, T value) const override {
-				Reflection::IDynamicProperties::Value v;
-				Reflection::set<T>(v, value);
+			void set(ComponentUID cmp, u32 array_index, T value) const override {
+				reflection::DynamicProperties::Value v;
+				reflection::set<T>(v, value);
 				prop->set(cmp, array_index, index, v);
 			}
 
-			const Reflection::IDynamicProperties* prop;
+			const reflection::DynamicProperties* prop;
 			ComponentUID cmp;
 			int index;
-		} p;
+		} p(m_app.getAllocator());
+
 		p.name = prop.getName(cmp, m_index, prop_index);
 		p.prop = &prop;
 		p.index =  prop_index;
 		visit(p);
 	}
 
-	void visit(const Reflection::IDynamicProperties& prop) override {
+	void visit(const reflection::DynamicProperties& prop) override {
 		ComponentUID cmp = getComponent();;
 		for (u32 i = 0, c = prop.getCount(cmp, m_index); i < c; ++i) {
-			const Reflection::IDynamicProperties::Type type = prop.getType(cmp, m_index, i);
+			const reflection::DynamicProperties::Type type = prop.getType(cmp, m_index, i);
 			switch(type) {
-				case Reflection::IDynamicProperties::FLOAT: dynamicProperty<float>(cmp, prop, i); break;
-				case Reflection::IDynamicProperties::BOOLEAN: dynamicProperty<bool>(cmp, prop, i); break;
-				case Reflection::IDynamicProperties::ENTITY: dynamicProperty<EntityPtr>(cmp, prop, i); break;
-				case Reflection::IDynamicProperties::I32: dynamicProperty<i32>(cmp, prop, i); break;
-				case Reflection::IDynamicProperties::STRING: dynamicProperty<const char*>(cmp, prop, i); break;
-				case Reflection::IDynamicProperties::COLOR: {
-					struct : Reflection::Property<Vec3> {
-						Span<const Reflection::IAttribute* const> getAttributes() const override {
-							return Span((const Reflection::IAttribute*const*)attrs, 1);
+				case reflection::DynamicProperties::FLOAT: dynamicProperty<float>(cmp, prop, i); break;
+				case reflection::DynamicProperties::BOOLEAN: dynamicProperty<bool>(cmp, prop, i); break;
+				case reflection::DynamicProperties::ENTITY: dynamicProperty<EntityPtr>(cmp, prop, i); break;
+				case reflection::DynamicProperties::I32: dynamicProperty<i32>(cmp, prop, i); break;
+				case reflection::DynamicProperties::STRING: dynamicProperty<const char*>(cmp, prop, i); break;
+				case reflection::DynamicProperties::COLOR: {
+					struct Prop : reflection::Property<Vec3> {
+						Prop(IAllocator& allocator) : Property<Vec3>(allocator) {}
+
+						Vec3 get(ComponentUID cmp, u32 array_index) const override {
+							return reflection::get<Vec3>(prop->getValue(cmp, array_index, index));
 						}
-						
-						Vec3 get(ComponentUID cmp, int array_index) const override {
-							return Reflection::get<Vec3>(prop->getValue(cmp, array_index, index));
-						}
-						void set(ComponentUID cmp, int array_index, Vec3 value) const override {
-							Reflection::IDynamicProperties::Value v;
-							Reflection::set(v, value);
+						void set(ComponentUID cmp, u32 array_index, Vec3 value) const override {
+							reflection::DynamicProperties::Value v;
+							reflection::set(v, value);
 							prop->set(cmp, array_index, index, v);
 						}
-						const Reflection::IDynamicProperties* prop;
+
+						const reflection::DynamicProperties* prop;
 						ComponentUID cmp;
 						int index;
-						Reflection::ColorAttribute attr;
-						Reflection::IAttribute* attrs[1] = { &attr };
-					} p;
+						reflection::ColorAttribute attr;
+					} p(m_app.getAllocator());
+
 					p.name = prop.getName(cmp, m_index, i);
 					p.prop = &prop;
 					p.index =  i;
+					p.attributes.push(&p.attr);
 					visit(p);
 					break;
 				}
-				case Reflection::IDynamicProperties::RESOURCE: {
-					struct : Reflection::Property<Path> {
-						Span<const Reflection::IAttribute* const> getAttributes() const override {
-							return Span((const Reflection::IAttribute*const*)attrs, 1);
+				case reflection::DynamicProperties::RESOURCE: {
+					struct Prop : reflection::Property<Path> {
+						Prop(IAllocator& allocator) : Property<Path>(allocator) {}
+
+						Path get(ComponentUID cmp, u32 array_index) const override {
+							return Path(reflection::get<const char*>(prop->getValue(cmp, array_index, index)));
 						}
-						
-						Path get(ComponentUID cmp, int array_index) const override {
-							return Path(Reflection::get<const char*>(prop->getValue(cmp, array_index, index)));
-						}
-						void set(ComponentUID cmp, int array_index, Path value) const override {
-							Reflection::IDynamicProperties::Value v;
-							Reflection::set(v, value.c_str());
+
+						void set(ComponentUID cmp, u32 array_index, Path value) const override {
+							reflection::DynamicProperties::Value v;
+							reflection::set(v, value.c_str());
 							prop->set(cmp, array_index, index, v);
 						}
-						const Reflection::IDynamicProperties* prop;
+
+						const reflection::DynamicProperties* prop;
 						ComponentUID cmp;
 						int index;
-						Reflection::ResourceAttribute attr;
-						Reflection::IAttribute* attrs[1] = { &attr };
-					} p;
+						reflection::ResourceAttribute attr;
+					} p(m_app.getAllocator());
+
 					p.attr = prop.getResourceAttribute(cmp, m_index, i);
 					p.name = prop.getName(cmp, m_index, i);
 					p.prop = &prop;
 					p.index =  i;
+					p.attributes.push(&p.attr);
 					visit(p);
 					break;
 				}
@@ -195,8 +202,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 		}
 	}
 
-
-	void visit(const Reflection::Property<float>& prop) override
+	void visit(const reflection::Property<float>& prop) override
 	{
 		Attributes attrs = getAttributes(prop);
 		ComponentUID cmp = getComponent();
@@ -214,11 +220,11 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 		ImGui::PopID();
 	}
 
-	void visit(const Reflection::Property<int>& prop) override
+	void visit(const reflection::Property<int>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		int value = prop.get(cmp, m_index);
-		auto* enum_attr = (Reflection::EnumAttribute*)Reflection::getAttribute(prop, Reflection::IAttribute::ENUM);
+		auto* enum_attr = (reflection::EnumAttribute*)reflection::getAttribute(prop, reflection::IAttribute::ENUM);
 
 		if (enum_attr) {
 			if (m_entities.size() > 1) {
@@ -257,12 +263,12 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<u32>& prop) override
+	void visit(const reflection::Property<u32>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		u32 value = prop.get(cmp, m_index);
 		
-		auto* enum_attr = (Reflection::EnumAttribute*)Reflection::getAttribute(prop, Reflection::IAttribute::ENUM);
+		auto* enum_attr = (reflection::EnumAttribute*)reflection::getAttribute(prop, reflection::IAttribute::ENUM);
 		if (enum_attr) {
 			if (m_entities.size() > 1) {
 				ImGuiEx::Label(prop.name);
@@ -300,7 +306,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<EntityPtr>& prop) override
+	void visit(const reflection::Property<EntityPtr>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		EntityPtr entity = prop.get(cmp, m_index);
@@ -345,10 +351,11 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 
 
 		Universe& universe = *m_editor.getUniverse();
-		if (ImGui::BeginResizablePopup("popup", ImVec2(200, 300)))
+		if (ImGuiEx::BeginResizablePopup("popup", ImVec2(200, 300)))
 		{
 			static char entity_filter[32] = {};
-			ImGui::SetNextItemWidth(-20);
+			const float w = ImGui::CalcTextSize(ICON_FA_TIMES).x + ImGui::GetStyle().ItemSpacing.x * 2;
+			ImGui::SetNextItemWidth(-w);
 			ImGui::InputTextWithHint("##filter", "Filter", entity_filter, sizeof(entity_filter));
 			ImGui::SameLine();
 			if (ImGuiEx::IconButton(ICON_FA_TIMES, "Clear filter")) {
@@ -373,11 +380,12 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<Vec2>& prop) override
+	void visit(const reflection::Property<Vec2>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		Vec2 value = prop.get(cmp, m_index);
 		Attributes attrs = getAttributes(prop);
+		if (attrs.no_ui) return;
 
 		if (attrs.is_radians) value = radiansToDegrees(value);
 		ImGuiEx::Label(prop.name);
@@ -391,7 +399,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<Vec3>& prop) override
+	void visit(const reflection::Property<Vec3>& prop) override
 	{
 		Attributes attrs = getAttributes(prop);
 		ComponentUID cmp = getComponent();
@@ -419,7 +427,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<IVec3>& prop) override
+	void visit(const reflection::Property<IVec3>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		IVec3 value = prop.get(cmp, m_index);
@@ -433,7 +441,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<Vec4>& prop) override
+	void visit(const reflection::Property<Vec4>& prop) override
 	{
 		Attributes attrs = getAttributes(prop);
 		ComponentUID cmp = getComponent();
@@ -459,7 +467,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<bool>& prop) override
+	void visit(const reflection::Property<bool>& prop) override
 	{
 		if (equalIStrings(prop.name, "enabled") && m_index == -1 && m_entities.size() == 1) return;
 		ComponentUID cmp = getComponent();
@@ -475,18 +483,19 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<Path>& prop) override
+	void visit(const reflection::Property<Path>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		const Path p = prop.get(cmp, m_index);
-		char tmp[MAX_PATH_LENGTH];
+		char tmp[LUMIX_MAX_PATH];
 		copyString(tmp, p.c_str());
 
 		Attributes attrs = getAttributes(prop);
+		if (attrs.no_ui) return;
 
 		ImGuiEx::Label(prop.name);
 		ImGui::PushID(prop.name);
-		if (attrs.resource_type != INVALID_RESOURCE_TYPE)
+		if (attrs.resource_type.isValid())
 		{
 			if (m_app.getAssetBrowser().resourceInput(prop.name, Span(tmp), attrs.resource_type))
 			{
@@ -504,7 +513,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 	}
 
 
-	void visit(const Reflection::Property<const char*>& prop) override
+	void visit(const reflection::Property<const char*>& prop) override
 	{
 		ComponentUID cmp = getComponent();
 		const Attributes attrs = getAttributes(prop);
@@ -514,7 +523,28 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 
 		ImGuiEx::Label(prop.name);
 		ImGui::PushID(prop.name);
-		if(attrs.is_multiline) {
+		
+		auto* enum_attr = (reflection::StringEnumAttribute*)reflection::getAttribute(prop, reflection::IAttribute::STRING_ENUM);
+		if (enum_attr) {
+			if (m_entities.size() > 1) {
+				ImGui::TextUnformatted("Multi-object editing not supported.");
+				ImGui::PopID();
+				return;
+			}
+
+			const int count = enum_attr->count(cmp);
+
+			if (ImGui::BeginCombo("##v", tmp)) {
+				for (int i = 0; i < count; ++i) {
+					const char* val_name = enum_attr->name(cmp, i);
+					if (ImGui::Selectable(val_name)) {
+						m_editor.setProperty(m_cmp_type, m_array, m_index, prop.name, m_entities, val_name);
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		else if(attrs.is_multiline) {
 			if (ImGui::InputTextMultiline("##v", tmp, sizeof(tmp))) {
 				m_editor.setProperty(m_cmp_type, m_array, m_index, prop.name, m_entities, tmp);
 			}
@@ -527,11 +557,9 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 		ImGui::PopID();
 	}
 
+	void visit(const reflection::BlobProperty& prop) override {}
 
-	void visit(const Reflection::IBlobProperty& prop) override {}
-
-
-	void visit(const Reflection::IArrayProperty& prop) override
+	void visit(const reflection::ArrayProperty& prop) override
 	{
 		ImGui::Unindent();
 		bool is_open = ImGui::TreeNodeEx(prop.name, ImGuiTreeNodeFlags_AllowItemOverlap);
@@ -582,7 +610,7 @@ struct GridUIVisitor final : Reflection::IPropertyVisitor
 			{
 				GridUIVisitor v(m_app, i, m_entities, m_cmp_type, m_editor);
 				v.m_array = prop.name;
-				prop.visit(v);
+				prop.visitChildren(v);
 				ImGui::TreePop();
 			}
 
@@ -614,7 +642,7 @@ static bool componentTreeNode(StudioApp& app, WorldEditor& editor, ComponentType
 	bool is_open;
 	bool enabled = true;
 	IScene* scene = editor.getUniverse()->getScene(cmp_type);
-	if (entities_count == 1 && Reflection::getPropertyValue(*scene, entities[0], cmp_type, "Enabled", Ref(enabled))) {
+	if (entities_count == 1 && reflection::getPropertyValue(*scene, entities[0], cmp_type, "Enabled", enabled)) {
 		is_open = ImGui::TreeNodeEx((void*)(uintptr)cmp_type.index, flags, "%s", "");
 		ImGui::SameLine();
 		ComponentUID cmp;
@@ -656,7 +684,7 @@ void PropertyGrid::showComponentProperties(const Array<EntityRef>& entities, Com
 
 	if (!is_open) return;
 
-	const Reflection::ComponentBase* component = Reflection::getComponent(cmp_type);
+	const reflection::ComponentBase* component = reflection::getComponent(cmp_type);
 	GridUIVisitor visitor(m_app, -1, entities, cmp_type, m_editor);
 	if (component) component->visit(visitor);
 
@@ -677,7 +705,7 @@ void PropertyGrid::showComponentProperties(const Array<EntityRef>& entities, Com
 
 void PropertyGrid::showCoreProperties(const Array<EntityRef>& entities) const
 {
-	char name[256];
+	char name[Universe::ENTITY_NAME_MAX_LENGTH];
 	Universe& universe = *m_editor.getUniverse();
 	const char* tmp = universe.getEntityName(entities[0]);
 	copyString(name, tmp);
@@ -718,7 +746,7 @@ void PropertyGrid::showCoreProperties(const Array<EntityRef>& entities) const
 			ImGuiEx::Label("Parent");
 			ImGui::Text("%s", name);
 
-			if (!universe.hasComponent(entities[0], GUI_RECT_TYPE)) {
+			if (!universe.hasComponent(entities[0], GUI_RECT_TYPE) || universe.hasComponent(entities[0], GUI_CANVAS_TYPE)) {
 				Transform tr = universe.getLocalTransform(entities[0]);
 				DVec3 old_pos = tr.pos;
 				ImGuiEx::Label("Local position");
@@ -745,7 +773,7 @@ void PropertyGrid::showCoreProperties(const Array<EntityRef>& entities) const
 	}
 
 
-	if (!universe.hasComponent(entities[0], GUI_RECT_TYPE)) {
+	if (!universe.hasComponent(entities[0], GUI_RECT_TYPE) || universe.hasComponent(entities[0], GUI_CANVAS_TYPE)) {
 		DVec3 pos = universe.getPosition(entities[0]);
 		DVec3 old_pos = pos;
 		ImGuiEx::Label("Position");
@@ -765,7 +793,8 @@ void PropertyGrid::showCoreProperties(const Array<EntityRef>& entities) const
 		Vec3 old_euler = rot.toEuler();
 		Vec3 euler = radiansToDegrees(old_euler);
 		ImGuiEx::Label("Rotation");
-		if (ImGui::DragFloat3("##rot", &euler.x))
+		const float rot_change_speed = ImGui::GetIO().KeyAlt ? 10.f : 1.f; // we won't have precision without this
+		if (ImGui::DragFloat3("##rot", &euler.x, rot_change_speed, 0, 0, "%.2f"))
 		{
 			if (euler.x <= -90.0f || euler.x >= 90.0f) euler.y = 0;
 			euler.x = degreesToRadians(clamp(euler.x, -90.0f, 90.0f));
@@ -778,9 +807,9 @@ void PropertyGrid::showCoreProperties(const Array<EntityRef>& entities) const
 			{
 				Vec3 tmp = universe.getRotation(entity).toEuler();
 			
-				if (fabs(euler.x - old_euler.x) > 0.01f) tmp.x = euler.x;
-				if (fabs(euler.y - old_euler.y) > 0.01f) tmp.y = euler.y;
-				if (fabs(euler.z - old_euler.z) > 0.01f) tmp.z = euler.z;
+				if (fabs(euler.x - old_euler.x) > 0.0001f) tmp.x = euler.x;
+				if (fabs(euler.y - old_euler.y) > 0.0001f) tmp.y = euler.y;
+				if (fabs(euler.z - old_euler.z) > 0.0001f) tmp.z = euler.z;
 				rots.emplace().fromEuler(tmp);
 			}
 			m_editor.setEntitiesRotations(&entities[0], &rots[0], entities.size());
@@ -853,8 +882,9 @@ void PropertyGrid::onGUI()
 			ImGui::OpenPopup("AddComponentPopup");
 		}
 		
-		if (ImGui::BeginResizablePopup("AddComponentPopup", ImVec2(300, 300))) {
-			ImGui::SetNextItemWidth(-20);
+		if (ImGuiEx::BeginResizablePopup("AddComponentPopup", ImVec2(300, 300))) {
+			const float w = ImGui::CalcTextSize(ICON_FA_TIMES).x + ImGui::GetStyle().ItemSpacing.x * 2;
+			ImGui::SetNextItemWidth(-w);
 			ImGui::InputTextWithHint("##filter", "Filter", m_component_filter, sizeof(m_component_filter));
 			ImGui::SameLine();
 			if (ImGuiEx::IconButton(ICON_FA_TIMES, "Clear filter")) {

@@ -13,11 +13,11 @@
 #include "engine/delegate_list.h"
 #include "engine/engine.h"
 #include "engine/geometry.h"
+#include "engine/os.h"
 #include "engine/path.h"
 #include "engine/path.h"
 #include "engine/prefab.h"
 #include "engine/profiler.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/string.h"
 #include "engine/universe.h"
@@ -29,6 +29,7 @@
 #include "renderer/material.h"
 #include "renderer/model.h"
 #include "renderer/pipeline.h"
+#include "renderer/pose.h"
 #include "renderer/render_scene.h"
 #include "renderer/renderer.h"
 #include "renderer/shader.h"
@@ -36,8 +37,9 @@
 namespace Lumix
 {
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType MESH_ACTOR_TYPE = Reflection::getComponentType("mesh_rigid_actor");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType PARTICLE_EMITTER_TYPE = reflection::getComponentType("particle_emitter");
+static const ComponentType MESH_ACTOR_TYPE = reflection::getComponentType("rigid_actor");
 
 struct UniverseViewImpl final : UniverseView {
 	enum class MouseMode
@@ -73,7 +75,7 @@ struct UniverseViewImpl final : UniverseView {
 		m_viewport.h = -1;
 		m_viewport.fov = view.m_app.getFOV();
 		m_viewport.near = 0.1f;
-		m_viewport.far = 10000.f;
+		m_viewport.far = 1'000'000.f;
 
 		ResourceManagerHub& rm = m_editor.getEngine().getResourceManager();
 		Path font_path("editor/fonts/NotoSans-Regular.ttf");
@@ -83,7 +85,7 @@ struct UniverseViewImpl final : UniverseView {
 	}
 
 	~UniverseViewImpl() {
-		m_font_res->getResourceManager().unload(*m_font_res);
+		m_font_res->decRefCount();
 		m_editor.universeCreated().unbind<&UniverseViewImpl::onUniverseCreated>(this);
 		m_editor.universeDestroyed().unbind<&UniverseViewImpl::onUniverseDestroyed>(this);
 		onUniverseDestroyed();
@@ -101,8 +103,7 @@ struct UniverseViewImpl final : UniverseView {
 	}
 
 	void onUniverseDestroyed(){
-		if (m_icons) EditorIcons::destroy(*m_icons);
-		m_icons = nullptr;
+		m_icons.reset();
 	}
 
 	void setSnapMode(bool enable, bool vertex_snap) override
@@ -156,7 +157,7 @@ struct UniverseViewImpl final : UniverseView {
 		}
 	}
 
-	void onMouseUp(int x, int y, OS::MouseButton button)
+	void onMouseUp(int x, int y, os::MouseButton button)
 	{
 		m_mouse_pos = {(float)x, (float)y};
 		if (m_mouse_mode == MouseMode::SELECT)
@@ -232,7 +233,7 @@ struct UniverseViewImpl final : UniverseView {
 		const DVec3 snap_pos = getClosestVertex(hit);
 
 		const Transform tr = m_editor.getUniverse()->getTransform(selected_entities[0]);
-		m_scene_view.m_app.getGizmoConfig().setOffset(tr.rot.conjugated() * (snap_pos - tr.pos).toFloat());
+		m_scene_view.m_app.getGizmoConfig().setOffset(tr.rot.conjugated() * Vec3(snap_pos - tr.pos));
 	}
 
 
@@ -242,7 +243,7 @@ struct UniverseViewImpl final : UniverseView {
 		const DVec3& wpos = hit.origin + hit.t * hit.dir;
 		Universe& universe = m_scene->getUniverse();
 		const Transform tr = universe.getTransform(entity);
-		const Vec3 lpos = tr.rot.conjugated() * (wpos - tr.pos).toFloat();
+		const Vec3 lpos = tr.rot.conjugated() * Vec3(wpos - tr.pos);
 		if (!universe.hasComponent(entity, MODEL_INSTANCE_TYPE)) return wpos;
 
 		Model* model = m_scene->getModelInstanceModel(entity);
@@ -250,7 +251,7 @@ struct UniverseViewImpl final : UniverseView {
 		float min_dist_squared = FLT_MAX;
 		Vec3 closest_vertex = lpos;
 		auto processVertex = [&](const Vec3& vertex) {
-			float dist_squared = (vertex - lpos).squaredLength();
+			float dist_squared = squaredLength(vertex - lpos);
 			if (dist_squared < min_dist_squared)
 			{
 				min_dist_squared = dist_squared;
@@ -288,13 +289,13 @@ struct UniverseViewImpl final : UniverseView {
 		for (auto& i : m_is_mouse_click) i = false;
 	}
 
-	bool isMouseClick(OS::MouseButton button) const override { return m_is_mouse_click[(int)button]; }
-	bool isMouseDown(OS::MouseButton button) const override { return m_is_mouse_down[(int)button]; }
+	bool isMouseClick(os::MouseButton button) const override { return m_is_mouse_click[(int)button]; }
+	bool isMouseDown(os::MouseButton button) const override { return m_is_mouse_down[(int)button]; }
 
 	void onMouseMove(int x, int y, int relx, int rely)
 	{
 		PROFILE_FUNCTION();
-		m_mouse_pos.set((float)x, (float)y);
+		m_mouse_pos = Vec2((float)x, (float)y);
 		
 		static const float MOUSE_MULTIPLIER = 1 / 200.0f;
 
@@ -321,19 +322,19 @@ struct UniverseViewImpl final : UniverseView {
 		}
 	}
 
-	void onMouseDown(int x, int y, OS::MouseButton button)
+	void onMouseDown(int x, int y, os::MouseButton button)
 	{
 		m_is_mouse_click[(int)button] = true;
 		m_is_mouse_down[(int)button] = true;
-		if(button == OS::MouseButton::MIDDLE)
+		if(button == os::MouseButton::MIDDLE)
 		{
 			m_mouse_mode = MouseMode::PAN;
 		}
-		else if (button == OS::MouseButton::RIGHT)
+		else if (button == os::MouseButton::RIGHT)
 		{
 			m_mouse_mode = MouseMode::NAVIGATE;
 		}
-		else if (button == OS::MouseButton::LEFT)
+		else if (button == os::MouseButton::LEFT)
 		{
 			DVec3 origin;
 			Vec3 dir;
@@ -368,6 +369,11 @@ struct UniverseViewImpl final : UniverseView {
 	const Viewport& getViewport() const override { return m_viewport; }
 	void setViewport(const Viewport& vp) override { m_viewport = vp; }
 
+	void refreshIcons() override {
+		m_icons->refresh();
+	}
+
+
 	void copyTransform() override {
 		if (m_editor.getSelectedEntities().empty()) return;
 
@@ -383,7 +389,7 @@ struct UniverseViewImpl final : UniverseView {
 		m_go_to_parameters.m_from = m_viewport.pos;
 		const Vec3 dir = m_viewport.rot.rotate(Vec3(0, 0, 1));
 		m_go_to_parameters.m_to = universe->getPosition(m_editor.getSelectedEntities()[0]) + dir * 10;
-		const double len = (m_go_to_parameters.m_to - m_go_to_parameters.m_from).length();
+		const double len = length(m_go_to_parameters.m_to - m_go_to_parameters.m_from);
 		m_go_to_parameters.m_speed = maximum(100.0f / (len > 0 ? float(len) : 1), 2.0f);
 		m_go_to_parameters.m_from_rot = m_go_to_parameters.m_to_rot = m_viewport.rot;
 
@@ -439,7 +445,7 @@ struct UniverseViewImpl final : UniverseView {
 	{
 		const Quat rot = m_viewport.rot;
 
-		right = m_scene_view.m_orbit_action->isActive() ? 0 : right;
+		right = m_scene_view.m_orbit_action.isActive() ? 0 : right;
 
 		m_viewport.pos += rot.rotate(Vec3(0, 0, -1)) * forward * speed;
 		m_viewport.pos += rot.rotate(Vec3(1, 0, 0)) * right * speed;
@@ -453,19 +459,17 @@ struct UniverseViewImpl final : UniverseView {
 		const Quat old_rot = rot;
 
 		Quat yaw_rot(Vec3(0, 1, 0), yaw);
-		rot = yaw_rot * rot;
-		rot.normalize();
+		rot = normalize(yaw_rot * rot);
 
 		Vec3 pitch_axis = rot.rotate(Vec3(1, 0, 0));
 		const Quat pitch_rot(pitch_axis, pitch);
-		rot = pitch_rot * rot;
-		rot.normalize();
+		rot = normalize(pitch_rot * rot);
 
-		if (m_scene_view.m_orbit_action->isActive() && !m_editor.getSelectedEntities().empty())
+		if (m_scene_view.m_orbit_action.isActive() && !m_editor.getSelectedEntities().empty())
 		{
 			const Vec3 dir = rot.rotate(Vec3(0, 0, 1));
 			const DVec3 entity_pos = universe->getPosition(m_editor.getSelectedEntities()[0]);
-			const float dist = float((entity_pos - pos).length());
+			const float dist = float(length(entity_pos - pos));
 			pos = entity_pos + dir * dist;
 		}
 
@@ -490,7 +494,7 @@ struct UniverseViewImpl final : UniverseView {
 		}
 		previewSnapVertex();
 		
-		if (m_is_mouse_down[(int)OS::MouseButton::LEFT] && m_mouse_mode == MouseMode::SELECT) {
+		if (m_is_mouse_down[(int)os::MouseButton::LEFT] && m_mouse_mode == MouseMode::SELECT) {
 			Draw2D& d2d = m_scene_view.getPipeline()->getDraw2D();
 			d2d.addRect(m_rect_selection_start, m_mouse_pos, Color(0xfffffFFF), 1);
 			d2d.addRect(m_rect_selection_start - Vec2(1, 1), m_mouse_pos + Vec2(1, 1), Color(0, 0, 0, 0xff), 1);
@@ -573,12 +577,12 @@ struct UniverseViewImpl final : UniverseView {
 	SnapMode m_snap_mode = SnapMode::NONE;
 	Vec2 m_mouse_pos;
 	Vec2 m_mouse_sensitivity{200, 200};
-	bool m_is_mouse_down[(int)OS::MouseButton::EXTENDED] = {};
-	bool m_is_mouse_click[(int)OS::MouseButton::EXTENDED] = {};
+	bool m_is_mouse_down[(int)os::MouseButton::EXTENDED] = {};
+	bool m_is_mouse_click[(int)os::MouseButton::EXTENDED] = {};
 	StudioApp::MousePlugin* m_mouse_handling_plugin = nullptr;
 	Vec2 m_rect_selection_start;
 	float m_rect_selection_timer = 0;
-	EditorIcons* m_icons = nullptr;
+	UniquePtr<EditorIcons> m_icons;
 	RenderScene* m_scene;
 	Array<Vertex> m_draw_vertices;
 	Array<DrawCmd> m_draw_cmds;
@@ -596,6 +600,41 @@ SceneView::SceneView(StudioApp& app)
 
 	Engine& engine = m_editor.getEngine();
 	IAllocator& allocator = engine.getAllocator();
+
+
+	m_copy_move_action.init("Duplicate move", "Duplicate entity when moving with gizmo", "duplicateEntityMove", "", false);
+	m_orbit_action.init("Orbit", "Orbit with RMB", "orbitRMB", "", false);
+	m_toggle_gizmo_step_action.init("Enable/disable gizmo step", "Enable/disable gizmo step", "toggleGizmoStep", "", false);
+	m_move_forward_action.init("Move forward", "Move camera forward", "moveForward", "", false);
+	m_move_back_action.init("Move back", "Move camera back", "moveBack", "", false);
+	m_move_left_action.init("Move left", "Move camera left", "moveLeft", "", false);
+	m_move_right_action.init("Move right", "Move camera right", "moveRight", "", false);
+	m_move_up_action.init("Move up", "Move camera up", "moveUp", "", false);
+	m_move_down_action.init("Move down", "Move camera down", "moveDown", "", false);
+	m_camera_speed_action.init(ICON_FA_CAMERA "Camera speed", "Reset camera speed", "cameraSpeed", ICON_FA_CAMERA, false);
+	m_camera_speed_action.func.bind<&SceneView::resetCameraSpeed>(this);
+
+	m_app.addAction(&m_copy_move_action);
+	m_app.addAction(&m_orbit_action);
+	m_app.addAction(&m_toggle_gizmo_step_action);
+	m_app.addAction(&m_move_forward_action);
+	m_app.addAction(&m_move_back_action);
+	m_app.addAction(&m_move_left_action);
+	m_app.addAction(&m_move_right_action);
+	m_app.addAction(&m_move_up_action);
+	m_app.addAction(&m_move_down_action);
+	m_app.addAction(&m_camera_speed_action);
+
+	const ResourceType pipeline_type("pipeline");
+	m_app.getAssetCompiler().registerExtension("pln", pipeline_type); 
+
+}
+
+void SceneView::init() {
+	m_view = LUMIX_NEW(m_editor.getAllocator(), UniverseViewImpl)(*this);
+	m_editor.setView(m_view);
+
+	Engine& engine = m_editor.getEngine();
 	auto* renderer = static_cast<Renderer*>(engine.getPluginManager().getPlugin("renderer"));
 	PipelineResource* pres = engine.getResourceManager().load<PipelineResource>(Path("pipelines/main.pln"));
 	m_pipeline = Pipeline::create(*renderer, pres, "SCENE_VIEW", engine.getAllocator());
@@ -605,55 +644,7 @@ SceneView::SceneView(StudioApp& app)
 
 	ResourceManagerHub& rm = engine.getResourceManager();
 	m_debug_shape_shader = rm.load<Shader>(Path("pipelines/debug_shape.shd"));
-
-	m_copy_move_action = LUMIX_NEW(allocator, Action)("Duplicate move", "Duplicate entity when moving with gizmo", "duplicateEntityMove");
-	m_copy_move_action->is_global = false;
-	m_app.addAction(m_copy_move_action);
-
-	m_orbit_action = LUMIX_NEW(allocator, Action)("Orbit", "Orbit with RMB", "orbitRMB");
-	m_orbit_action->is_global = false;
-	m_app.addAction(m_orbit_action);
-
-	m_toggle_gizmo_step_action = LUMIX_NEW(allocator, Action)("Enable/disable gizmo step", "Enable/disable gizmo step", "toggleGizmoStep");
-	m_toggle_gizmo_step_action->is_global = false;
-	m_app.addAction(m_toggle_gizmo_step_action);
-
-	m_move_forward_action = LUMIX_NEW(allocator, Action)("Move forward", "Move camera forward", "moveForward");
-	m_move_forward_action->is_global = false;
-	m_app.addAction(m_move_forward_action);
-
-	m_move_back_action = LUMIX_NEW(allocator, Action)("Move back", "Move camera back", "moveBack");
-	m_move_back_action->is_global = false;
-	m_app.addAction(m_move_back_action);
-
-	m_move_left_action = LUMIX_NEW(allocator, Action)("Move left", "Move camera left", "moveLeft");
-	m_move_left_action->is_global = false;
-	m_app.addAction(m_move_left_action);
-
-	m_move_right_action = LUMIX_NEW(allocator, Action)("Move right", "Move camera right", "moveRight");
-	m_move_right_action->is_global = false;
-	m_app.addAction(m_move_right_action);
-
-	m_move_up_action = LUMIX_NEW(allocator, Action)("Move up", "Move camera up", "moveUp");
-	m_move_up_action->is_global = false;
-	m_app.addAction(m_move_up_action);
-
-	m_move_down_action = LUMIX_NEW(allocator, Action)("Move down", "Move camera down", "moveDown");
-	m_move_down_action->is_global = false;
-	m_app.addAction(m_move_down_action);
-
-	m_camera_speed_action = LUMIX_NEW(allocator, Action)(ICON_FA_CAMERA "Camera speed", "Reset camera speed", "cameraSpeed", ICON_FA_CAMERA);
-	m_camera_speed_action->is_global = false;
-	m_camera_speed_action->func.bind<&SceneView::resetCameraSpeed>(this);
-	m_app.addAction(m_camera_speed_action);
-
-	const ResourceType pipeline_type("pipeline");
-	m_app.getAssetCompiler().registerExtension("pln", pipeline_type); 
-
-	m_view = LUMIX_NEW(m_editor.getAllocator(), UniverseViewImpl)(*this);
-	m_editor.setView(m_view);
 }
-
 
 void SceneView::resetCameraSpeed()
 {
@@ -663,18 +654,26 @@ void SceneView::resetCameraSpeed()
 
 SceneView::~SceneView()
 {
+	m_app.removeAction(&m_copy_move_action);
+	m_app.removeAction(&m_orbit_action);
+	m_app.removeAction(&m_toggle_gizmo_step_action);
+	m_app.removeAction(&m_move_forward_action);
+	m_app.removeAction(&m_move_back_action);
+	m_app.removeAction(&m_move_left_action);
+	m_app.removeAction(&m_move_right_action);
+	m_app.removeAction(&m_move_up_action);
+	m_app.removeAction(&m_move_down_action);
+	m_app.removeAction(&m_camera_speed_action);
 	m_editor.setView(nullptr);
 	LUMIX_DELETE(m_app.getAllocator(), m_view);
-	Pipeline::destroy(m_pipeline);
-	m_debug_shape_shader->getResourceManager().unload(*m_debug_shape_shader);
-	m_pipeline = nullptr;
+	m_debug_shape_shader->decRefCount();
 }
 
 void SceneView::manipulate() {
 	const Array<EntityRef>* selected = &m_editor.getSelectedEntities();
 	if (selected->empty()) return;
 
-	const bool is_snap = m_toggle_gizmo_step_action->isActive();
+	const bool is_snap = m_toggle_gizmo_step_action.isActive();
 	Gizmo::Config& cfg = m_app.getGizmoConfig();
 	cfg.enableStep(is_snap);
 		
@@ -682,12 +681,12 @@ void SceneView::manipulate() {
 	tr.pos += tr.rot.rotate(cfg.getOffset());
 	const Transform old_pivot_tr = tr;
 			
-	const bool copy_move = m_copy_move_action->isActive();
+	const bool copy_move = m_copy_move_action.isActive();
 	if (!copy_move || !m_view->m_is_mouse_down[0]) {
 		m_copy_moved = false;
 	}
 
-	if (!Gizmo::manipulate((*selected)[0].index, *m_view, Ref(tr), cfg)) return;
+	if (!Gizmo::manipulate((*selected)[0].index, *m_view, tr, cfg)) return;
 
 	if (copy_move && !m_copy_moved) {
 		m_editor.duplicateEntities();
@@ -718,7 +717,7 @@ void SceneView::manipulate() {
 			for (u32 i = 0, c = selected->size(); i < c; ++i) {
 				const Transform t = new_pivot_tr * old_pivot_tr.inverted() * universe.getTransform((*selected)[i]);
 				poss[i] = t.pos;
-				rots[i] = t.rot.normalized();
+				rots[i] = normalize(t.rot);
 			}
 			m_editor.setEntitiesPositionsAndRotations(selected->begin(), poss.begin(), rots.begin(), rots.size());
 
@@ -767,12 +766,12 @@ void SceneView::update(float time_delta)
 
 	float speed = m_camera_speed * time_delta * 60.f;
 	if (ImGui::GetIO().KeyShift) speed *= 10;
-	if (m_move_forward_action->isActive()) m_view->moveCamera(1.0f, 0, 0, speed);
-	if (m_move_back_action->isActive()) m_view->moveCamera(-1.0f, 0, 0, speed);
-	if (m_move_left_action->isActive()) m_view->moveCamera(0.0f, -1.0f, 0, speed);
-	if (m_move_right_action->isActive()) m_view->moveCamera(0.0f, 1.0f, 0, speed);
-	if (m_move_down_action->isActive()) m_view->moveCamera(0, 0, -1.0f, speed);
-	if (m_move_up_action->isActive()) m_view->moveCamera(0, 0, 1.0f, speed);
+	if (m_move_forward_action.isActive()) m_view->moveCamera(1.0f, 0, 0, speed);
+	if (m_move_back_action.isActive()) m_view->moveCamera(-1.0f, 0, 0, speed);
+	if (m_move_left_action.isActive()) m_view->moveCamera(0.0f, -1.0f, 0, speed);
+	if (m_move_right_action.isActive()) m_view->moveCamera(0.0f, 1.0f, 0, speed);
+	if (m_move_down_action.isActive()) m_view->moveCamera(0, 0, -1.0f, speed);
+	if (m_move_up_action.isActive()) m_view->moveCamera(0, 0, 1.0f, speed);
 }
 
 
@@ -814,14 +813,14 @@ void SceneView::renderIcons()
 			for (const Item& item : m_items) {
 				const Mesh::RenderData* rd = item.mesh;
 			
-				gpu::update(drawcall_ub, &item.mtx.m11, sizeof(item.mtx));
+				gpu::update(drawcall_ub, &item.mtx.columns[0].x, sizeof(item.mtx));
 				gpu::bindTextures(item.material->textures, 0, item.material->textures_count);
 				gpu::useProgram(item.program);
 				gpu::bindIndexBuffer(rd->index_buffer_handle);
 				gpu::bindVertexBuffer(0, rd->vertex_buffer_handle, 0, rd->vb_stride);
 				gpu::bindVertexBuffer(1, gpu::INVALID_BUFFER, 0, 0);
 				gpu::setState(item.material->render_states);
-				gpu::drawTriangles(rd->indices_count, rd->index_type);
+				gpu::drawTriangles(0, rd->indices_count, rd->index_type);
 			}
 		}
 
@@ -841,8 +840,8 @@ void SceneView::renderIcons()
 	Renderer* renderer = static_cast<Renderer*>(engine.getPluginManager().getPlugin("renderer"));
 
 	IAllocator& allocator = renderer->getAllocator();
-	RenderJob* cmd = LUMIX_NEW(allocator, RenderJob)(allocator);
-	cmd->m_ui = this;
+	RenderJob& cmd = renderer->createJob<RenderJob>(allocator);
+	cmd.m_ui = this;
 	renderer->queue(cmd, 0);
 }
 
@@ -851,7 +850,9 @@ void SceneView::renderSelection()
 {
 	struct RenderJob : Renderer::RenderJob
 	{
-		RenderJob(IAllocator& allocator) : m_items(allocator) {}
+		RenderJob(IAllocator& allocator) 
+			: m_allocator(allocator)
+			, m_items(allocator) {}
 
 		void setup() override
 		{
@@ -859,20 +860,35 @@ void SceneView::renderSelection()
 			const Array<EntityRef>& entities = m_editor->getSelectedEntities();
 			RenderScene* scene = m_pipeline->getScene();
 			const Universe& universe = scene->getUniverse();
+			
+			if (entities.size() > 5000) return;
 			for (EntityRef e : entities) {
 				if (!scene->getUniverse().hasComponent(e, MODEL_INSTANCE_TYPE)) continue;
 
 				const Model* model = scene->getModelInstanceModel(e);
 				if (!model || !model->isReady()) continue;
 
+				const Pose* pose = scene->lockPose(e);
 				for (int i = 0; i <= model->getLODIndices()[0].to; ++i) {
 					const Mesh& mesh = model->getMesh(i);
-					Item& item = m_items.emplace();
+					
+					Item& item = m_items.emplace(m_allocator);
+					item.material = mesh.material->getRenderData();
+					u32 define_mask = item.material->define_mask;
 					item.mesh = mesh.render_data;
 					item.mtx = universe.getRelativeMatrix(e, m_cam_pos);
-					item.material = mesh.material->getRenderData();
-					item.program = mesh.material->getShader()->getProgram(mesh.vertex_decl, item.material->define_mask);
+					if (pose && pose->count > 0 && mesh.type == Mesh::SKINNED) {
+						define_mask |= skinned_define;
+						item.pose.push(item.mtx);
+						for (int j = 0, c = pose->count; j < c; ++j) {
+							const Model::Bone& bone = model->getBone(j);
+							const LocalRigidTransform tmp = {pose->positions[j], pose->rotations[j]};
+							item.pose.push((tmp * bone.inv_bind_transform).toMatrix());
+						}
+					}
+					item.program = mesh.material->getShader()->getProgram(mesh.vertex_decl, define_mask);
 				}
+				scene->unlockPose(e, false);
 			}
 		}
 
@@ -885,25 +901,49 @@ void SceneView::renderSelection()
 			for (const Item& item : m_items) {
 				const Mesh::RenderData* rd = item.mesh;
 			
-				gpu::update(drawcall_ub, &item.mtx.m11, sizeof(item.mtx));
+				if (item.pose.empty()) {
+					gpu::update(drawcall_ub, &item.mtx.columns[0].x, sizeof(item.mtx));
+				}
+				else {
+					struct {
+						float layer;
+						float fur_scale;
+						float gravity;
+						float padding;
+						Matrix bones[256];
+					} dc;
+					ASSERT(item.pose.size() < (i32)lengthOf(dc.bones));
+					dc.layer = 0;
+					dc.fur_scale = 0;
+					dc.gravity = 0;
+					memcpy(dc.bones, item.pose.begin(), item.pose.byte_size());
+					const u32 size = item.pose.byte_size() + sizeof(Vec4);
+					gpu::update(drawcall_ub, &dc, size);
+					gpu::bindUniformBuffer(UniformBuffer::DRAWCALL, drawcall_ub, 0, size);
+				}
+
 				gpu::bindTextures(item.material->textures, 0, item.material->textures_count);
 				gpu::useProgram(item.program);
 				gpu::bindIndexBuffer(rd->index_buffer_handle);
 				gpu::bindVertexBuffer(0, rd->vertex_buffer_handle, 0, rd->vb_stride);
 				gpu::bindVertexBuffer(1, gpu::INVALID_BUFFER, 0, 0);
 				gpu::setState(item.material->render_states);
-				gpu::drawTriangles(rd->indices_count, rd->index_type);
+				gpu::drawTriangles(0, rd->indices_count, rd->index_type);
 			}
 			gpu::popDebugGroup();
 		}
 
 		struct Item {
+			Item(IAllocator& allocator) : pose(allocator) {}
+			Array<Matrix> pose;
 			gpu::ProgramHandle program;
 			Mesh::RenderData* mesh;
 			Material::RenderData* material;
 			Matrix mtx;
 		};
 
+		IAllocator& m_allocator;
+		u32 skinned_define;
 		Array<Item> m_items;
 		Pipeline* m_pipeline;
 		WorldEditor* m_editor;
@@ -913,10 +953,11 @@ void SceneView::renderSelection()
 	Engine& engine = m_editor.getEngine();
 	Renderer* renderer = static_cast<Renderer*>(engine.getPluginManager().getPlugin("renderer"));
 	IAllocator& allocator = renderer->getAllocator();
-	RenderJob* job = LUMIX_NEW(allocator, RenderJob)(allocator);
-	job->m_pipeline = m_pipeline;
-	job->m_editor = &m_editor;
-	job->m_cam_pos = m_view->getViewport().pos;
+	RenderJob& job = renderer->createJob<RenderJob>(allocator);
+	job.skinned_define = 1 << renderer->getShaderDefineIdx("SKINNED");
+	job.m_pipeline = m_pipeline.get();
+	job.m_editor = &m_editor;
+	job.m_cam_pos = m_view->getViewport().pos;
 	renderer->queue(job, 0);
 }
 
@@ -946,18 +987,18 @@ void SceneView::renderGizmos()
 
 			renderer->beginProfileBlock("gizmos", 0);
 			gpu::pushDebugGroup("gizmos");
-			gpu::setState(u64(gpu::StateFlags::DEPTH_TEST) | u64(gpu::StateFlags::DEPTH_WRITE));
+			gpu::setState(gpu::StateFlags::DEPTH_TEST | gpu::StateFlags::DEPTH_WRITE);
 			u32 offset = 0;
 			const gpu::BufferHandle drawcall_ub = view->getPipeline()->getDrawcallUniformBuffer();
 			const Matrix mtx = Matrix::IDENTITY;
 			for (const UniverseViewImpl::DrawCmd& cmd : cmds) {
-				gpu::update(drawcall_ub, &mtx.m11, sizeof(mtx));
+				gpu::update(drawcall_ub, &mtx.columns[0].x, sizeof(mtx));
 				gpu::useProgram(program);
 				gpu::bindIndexBuffer(gpu::INVALID_BUFFER);
 				gpu::bindVertexBuffer(0, vb.buffer, vb.offset + offset, sizeof(UniverseView::Vertex));
 				gpu::bindVertexBuffer(1, gpu::INVALID_BUFFER, 0, 0);
 				const gpu::PrimitiveType primitive_type = cmd.lines ? gpu::PrimitiveType::LINES : gpu::PrimitiveType::TRIANGLES;
-				gpu::drawArrays(0, cmd.vertex_count, primitive_type);
+				gpu::drawArrays(primitive_type, 0, cmd.vertex_count);
 
 				offset += cmd.vertex_count * sizeof(UniverseView::Vertex);
 			}
@@ -981,12 +1022,12 @@ void SceneView::renderGizmos()
 	Renderer* renderer = static_cast<Renderer*>(engine.getPluginManager().getPlugin("renderer"));
 
 	IAllocator& allocator = renderer->getAllocator();
-	Cmd* cmd = LUMIX_NEW(allocator, Cmd)(allocator);
+	Cmd& cmd = renderer->createJob<Cmd>(allocator);
 	gpu::VertexDecl decl;
 	decl.addAttribute(0, 0, 3, gpu::AttributeType::FLOAT, 0);
 	decl.addAttribute(1, 12, 4, gpu::AttributeType::U8, gpu::Attribute::NORMALIZED);
-	cmd->program = m_debug_shape_shader->getProgram(decl, 0);
-	cmd->view = this;
+	cmd.program = m_debug_shape_shader->getProgram(decl, 0);
+	cmd.view = this;
 	renderer->queue(cmd, 0);
 }
 
@@ -995,15 +1036,15 @@ void SceneView::captureMouse(bool capture)
 {
 	if(m_is_mouse_captured == capture) return;
 	m_is_mouse_captured = capture;
-	OS::showCursor(!m_is_mouse_captured);
+	os::showCursor(!m_is_mouse_captured);
 	if (capture) {
-		const OS::Point p = OS::getMouseScreenPos();
+		const os::Point p = os::getMouseScreenPos();
 		m_captured_mouse_x = p.x;
 		m_captured_mouse_y = p.y;
 	}
 	else {
-		OS::setMouseScreenPos(m_captured_mouse_x, m_captured_mouse_y);
-		OS::unclipCursor();
+		os::setMouseScreenPos(m_captured_mouse_x, m_captured_mouse_y);
+		os::unclipCursor();
 	}
 }
 
@@ -1025,11 +1066,21 @@ void SceneView::handleDrop(const char* path, float x, float y)
 {
 	const RayCastModelHit hit = castRay(x, y);
 
-	if (Path::hasExtension(path, "fbx"))
+	if (Path::hasExtension(path, "par")) {
+		const DVec3 pos = hit.origin + (hit.is_hit ? hit.t : 5) * hit.dir;
+		
+		m_editor.beginCommandGroup("insert_particle");
+		EntityRef entity = m_editor.addEntity();
+		m_editor.setEntitiesPositions(&entity, &pos, 1);
+		m_editor.addComponent(Span(&entity, 1), PARTICLE_EMITTER_TYPE);
+		m_editor.setProperty(PARTICLE_EMITTER_TYPE, "", -1, "Source", Span(&entity, 1), Path(path));
+		m_editor.endCommandGroup();
+	}
+	else if (Path::hasExtension(path, "fbx"))
 	{
 		const DVec3 pos = hit.origin + (hit.is_hit ? hit.t : 5) * hit.dir;
 
-		m_editor.beginCommandGroup(crc32("insert_mesh"));
+		m_editor.beginCommandGroup("insert_mesh");
 		EntityRef entity = m_editor.addEntity();
 		m_editor.setEntitiesPositions(&entity, &pos, 1);
 		m_editor.addComponent(Span(&entity, 1), MODEL_INSTANCE_TYPE);
@@ -1041,13 +1092,23 @@ void SceneView::handleDrop(const char* path, float x, float y)
 		ResourceManagerHub& manager = m_editor.getEngine().getResourceManager();
 		PrefabResource* prefab = manager.load<PrefabResource>(Path(path));
 		const DVec3 pos = hit.origin + (hit.is_hit ? hit.t : 1) * hit.dir;
-		m_editor.getPrefabSystem().instantiatePrefab(*prefab, pos, Quat::IDENTITY, 1);
+		if (prefab->isEmpty()) {
+			FileSystem& fs = m_editor.getEngine().getFileSystem();
+			while (fs.hasWork()) fs.processCallbacks();
+		}
+		if (prefab->isReady()) {
+			m_editor.getPrefabSystem().instantiatePrefab(*prefab, pos, Quat::IDENTITY, 1);
+		}
+		else {
+			ASSERT(prefab->isFailure());
+			logError("Failed to load ", prefab->getPath());
+		}
 	}
 	else if (Path::hasExtension(path, "phy"))
 	{
 		if (hit.is_hit && hit.entity.isValid())
 		{
-			m_editor.beginCommandGroup(crc32("insert_phy_component"));
+			m_editor.beginCommandGroup("insert_phy_component");
 			const EntityRef e = (EntityRef)hit.entity;
 			m_editor.selectEntities(Span(&e, 1), false);
 			m_editor.addComponent(Span(&e, 1), MESH_ACTOR_TYPE);
@@ -1057,7 +1118,7 @@ void SceneView::handleDrop(const char* path, float x, float y)
 		else
 		{
 			const DVec3 pos = hit.origin + (hit.is_hit ? hit.t : 1) * hit.dir;
-			m_editor.beginCommandGroup(crc32("insert_phy"));
+			m_editor.beginCommandGroup("insert_phy");
 			EntityRef entity = m_editor.addEntity();
 			m_editor.setEntitiesPositions(&entity, &pos, 1);
 			m_editor.selectEntities(Span(&entity, 1), false);
@@ -1081,7 +1142,7 @@ void SceneView::onToolbar()
 		"viewSide" };
 
 	auto pos = ImGui::GetCursorScreenPos();
-	if (ImGui::BeginToolbar("scene_view_toolbar", pos, ImVec2(0, 24)))
+	if (ImGuiEx::BeginToolbar("scene_view_toolbar", pos, ImVec2(0, 24)))
 	{
 		for (auto* action_name : actions_names)
 		{
@@ -1151,32 +1212,32 @@ void SceneView::onToolbar()
 
 	if (m_is_measure_active) {
 		ImGui::SameLine(0, 20);
-		const double d = (m_measure_to - m_measure_from).length();
+		const double d = length(m_measure_to - m_measure_from);
 		ImGui::Text(" | Measured distance: %f", d);
 	}
 
 	ImGui::PopItemWidth();
 
-	ImGui::EndToolbar();
+	ImGuiEx::EndToolbar();
 }
 
 void SceneView::handleEvents() {
-	const bool handle_input = m_is_mouse_captured || (ImGui::IsItemHovered() && OS::getFocused() == ImGui::GetWindowViewport()->PlatformHandle);
-	const OS::Event* events = m_app.getEvents();
+	const bool handle_input = m_is_mouse_captured || (ImGui::IsItemHovered() && os::getFocused() == ImGui::GetWindowViewport()->PlatformHandle);
+	const os::Event* events = m_app.getEvents();
 	for (int i = 0, c = m_app.getEventsCount(); i < c; ++i) {
-		const OS::Event& event = events[i];
+		const os::Event& event = events[i];
 		switch (event.type) {
-			case OS::Event::Type::MOUSE_BUTTON: {
-				const OS::Point cp = OS::getMouseScreenPos();
+			case os::Event::Type::MOUSE_BUTTON: {
+				const os::Point cp = os::getMouseScreenPos();
 				Vec2 rel_mp = { (float)cp.x, (float)cp.y };
 				rel_mp.x -= m_screen_x;
 				rel_mp.y -= m_screen_y;
 				if (handle_input) {
-					if (event.mouse_button.button == OS::MouseButton::RIGHT) {
+					if (event.mouse_button.button == os::MouseButton::RIGHT) {
 						ImGui::SetWindowFocus();
 						captureMouse(event.mouse_button.down);
 					}
-					ImGui::ResetActiveID();
+					ImGuiEx::ResetActiveID();
 					if (event.mouse_button.down) {
 						m_view->onMouseDown((int)rel_mp.x, (int)rel_mp.y, event.mouse_button.button);
 					}
@@ -1189,9 +1250,9 @@ void SceneView::handleEvents() {
 				}
 				break;
 			}
-			case OS::Event::Type::MOUSE_MOVE: 
+			case os::Event::Type::MOUSE_MOVE: 
 				if (handle_input) {
-					const OS::Point cp = OS::getMouseScreenPos();
+					const os::Point cp = os::getMouseScreenPos();
 					Vec2 rel_mp = {(float)cp.x, (float)cp.y};
 					rel_mp.x -= m_screen_x;
 					rel_mp.y -= m_screen_y;
@@ -1265,8 +1326,8 @@ void SceneView::onWindowGUI()
 			m_height = int(size.y);
 			view_pos = ImGui::GetCursorScreenPos();
 			
-			if (texture_handle.isValid()) {
-				void* t = (void*)(uintptr)texture_handle.value;
+			if (texture_handle) {
+				void* t = texture_handle;
 				if (gpu::isOriginBottomLeft()) {
 					ImGui::Image(t, size, ImVec2(0, 1), ImVec2(1, 0));
 				} 
@@ -1278,7 +1339,7 @@ void SceneView::onWindowGUI()
 			if (m_is_mouse_captured) {
 				const ImVec2 pos = ImGui::GetItemRectMin();
 				const ImVec2 size = ImGui::GetItemRectSize();
-				OS::clipCursor((int)pos.x, (int)pos.y, (int)size.x, (int)size.y);
+				os::clipCursor((int)pos.x, (int)pos.y, (int)size.x, (int)size.y);
 			}
 
 			if (ImGui::BeginDragDropTarget()) {
@@ -1298,7 +1359,7 @@ void SceneView::onWindowGUI()
 		m_view->m_draw_cmds.clear();
 	}
 
-	if (m_is_mouse_captured && OS::getFocused() != ImGui::GetWindowViewport()->PlatformHandle) {
+	if (m_is_mouse_captured && os::getFocused() != ImGui::GetWindowViewport()->PlatformHandle) {
 		captureMouse(false);
 	}
 	ImGui::End();

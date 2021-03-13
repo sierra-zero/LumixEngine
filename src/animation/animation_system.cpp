@@ -4,7 +4,6 @@
 #include "animation/property_animation.h"
 #include "animation/controller.h"
 #include "engine/engine.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/universe.h"
 
@@ -51,9 +50,7 @@ struct AnimationSystemImpl final : IPlugin
 	explicit AnimationSystemImpl(Engine& engine);
 	~AnimationSystemImpl();
 
-	void registerLuaAPI() const;
 	void createScenes(Universe& ctx) override;
-	void destroyScene(IScene* scene) override;
 	const char* getName() const override { return "animation"; }
 	u32 getVersion() const override { return 0; }
 	void serialize(OutputMemoryStream& stream) const override {}
@@ -63,7 +60,7 @@ struct AnimationSystemImpl final : IPlugin
 	Engine& m_engine;
 	AnimResourceManager<Animation> m_animation_manager;
 	AnimResourceManager<PropertyAnimation> m_property_animation_manager;
-	AnimResourceManager<Anim::Controller> m_controller_manager;
+	AnimResourceManager<anim::Controller> m_controller_manager;
 };
 
 
@@ -74,30 +71,10 @@ AnimationSystemImpl::AnimationSystemImpl(Engine& engine)
 	, m_property_animation_manager(m_allocator)
 	, m_controller_manager(m_allocator)
 {
+	AnimationScene::reflect(engine);
 	m_animation_manager.create(Animation::TYPE, m_engine.getResourceManager());
 	m_property_animation_manager.create(PropertyAnimation::TYPE, m_engine.getResourceManager());
-	m_controller_manager.create(Anim::Controller::TYPE, m_engine.getResourceManager());
-
-	using namespace Reflection;
-	static auto anim_scene = scene("animation",
-		component("property_animator", 
-			property("Animation", LUMIX_PROP(AnimationScene, PropertyAnimation),
-				ResourceAttribute("Property animation (*.anp)", PropertyAnimation::TYPE)),
-			property("Enabled", &AnimationScene::isPropertyAnimatorEnabled, &AnimationScene::enablePropertyAnimator)
-		),
-		component("animator",
-			property("Source", LUMIX_PROP(AnimationScene, AnimatorSource),
-				ResourceAttribute("Animation controller (*.act)", Anim::Controller::TYPE)),
-			property("Default set", LUMIX_PROP(AnimationScene, AnimatorDefaultSet))
-		),
-		component("animable",
-			property("Animation", LUMIX_PROP(AnimationScene, Animation),
-				ResourceAttribute("Animation (*.ani)", Animation::TYPE))
-		)
-	);
-	registerScene(anim_scene);
-
-	registerLuaAPI();
+	m_controller_manager.create(anim::Controller::TYPE, m_engine.getResourceManager());
 }
 
 
@@ -109,20 +86,11 @@ AnimationSystemImpl::~AnimationSystemImpl()
 }
 
 
-void AnimationSystemImpl::registerLuaAPI() const
-{
-	AnimationScene::registerLuaAPI(m_engine.getState());
-}
-
-
 void AnimationSystemImpl::createScenes(Universe& ctx)
 {
-	AnimationScene* scene = AnimationScene::create(m_engine, *this, ctx, m_allocator);
-	ctx.addScene(scene);
+	UniquePtr<AnimationScene> scene = AnimationScene::create(m_engine, *this, ctx, m_allocator);
+	ctx.addScene(scene.move());
 }
-
-
-void AnimationSystemImpl::destroyScene(IScene* scene) { LUMIX_DELETE(m_allocator, scene); }
 
 
 LUMIX_PLUGIN_ENTRY(animation)

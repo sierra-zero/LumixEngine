@@ -4,6 +4,11 @@
 #ifndef _W64 
 	#define _W64 __w64
 #endif
+#define SymGetLineFromAddr SymGetLineFromAddr64
+#define CaptureStackBackTrace RtlCaptureStackBackTrace
+#define IMAGEHLP_LINE IMAGEHLP_LINE64
+#define ERROR_SUCCESS 0L
+#define XUSER_MAX_COUNT 4
 #define MEM_COMMIT 0x00001000  
 #define MEM_RESERVE 0x00002000  
 #define MEM_RELEASE 0x00008000  
@@ -22,9 +27,12 @@
 #define WSABASEERR 10000
 #define WSAEWOULDBLOCK (WSABASEERR + 35)
 #define DECLSPEC_IMPORT __declspec(dllimport)
+#define IMAGEAPI DECLSPEC_IMPORT __stdcall
 #define WINBASEAPI DECLSPEC_IMPORT
 #define WINUSERAPI DECLSPEC_IMPORT
+#define NTSYSAPI DECLSPEC_IMPORT
 #define WINAPI __stdcall
+#define NTAPI __stdcall
 #define GENERIC_READ (0x80000000L)
 #define GENERIC_WRITE (0x40000000L)
 #define FILE_SHARE_READ 0x00000001
@@ -236,13 +244,41 @@ typedef unsigned int UINT;
 typedef void* HINSTANCE;
 typedef wchar_t WCHAR;
 typedef WCHAR *NWPSTR, *LPWSTR, *PWSTR;
-
+typedef unsigned __int64 ULONG64, *PULONG64;
+typedef unsigned __int64 DWORD64, *PDWORD64;
+typedef DWORD* PDWORD;
+typedef CHAR* PCHAR;
 
 typedef VOID (WINAPI *PFIBER_START_ROUTINE)(LPVOID lpFiberParameter);
 typedef PFIBER_START_ROUTINE LPFIBER_START_ROUTINE;
 typedef DWORD(WINAPI* PTHREAD_START_ROUTINE)(LPVOID lpThreadParameter);
 typedef PTHREAD_START_ROUTINE LPTHREAD_START_ROUTINE;
 
+typedef struct _IMAGEHLP_LINE64 {
+	DWORD SizeOfStruct;
+	PVOID Key;
+	DWORD LineNumber;
+	PCHAR FileName;
+	DWORD64 Address;
+} IMAGEHLP_LINE64, *PIMAGEHLP_LINE64;
+
+typedef struct _SYMBOL_INFO {
+	ULONG SizeOfStruct;
+	ULONG TypeIndex;
+	ULONG64 Reserved[2];
+	ULONG Index;
+	ULONG Size;
+	ULONG64 ModBase;
+	ULONG Flags;
+	ULONG64 Value;
+	ULONG64 Address;
+	ULONG Register;
+	ULONG Scope;
+	ULONG Tag;
+	ULONG NameLen;
+	ULONG MaxNameLen;
+	CHAR Name[1];
+} SYMBOL_INFO, *PSYMBOL_INFO;
 
 typedef struct in_addr
 {
@@ -277,7 +313,26 @@ struct sockaddr_in
 
 typedef UINT_PTR SOCKET;
 typedef unsigned short WORD;
+typedef short SHORT;
 typedef struct sockaddr_in SOCKADDR_IN;
+
+
+typedef struct _XINPUT_GAMEPAD
+{
+    WORD                                wButtons;
+    BYTE                                bLeftTrigger;
+    BYTE                                bRightTrigger;
+    SHORT                               sThumbLX;
+    SHORT                               sThumbLY;
+    SHORT                               sThumbRX;
+    SHORT                               sThumbRY;
+} XINPUT_GAMEPAD, *PXINPUT_GAMEPAD;
+
+typedef struct _XINPUT_STATE
+{
+    DWORD                               dwPacketNumber;
+    XINPUT_GAMEPAD                      Gamepad;
+} XINPUT_STATE, *PXINPUT_STATE;
 
 typedef struct _LIST_ENTRY {
 	struct _LIST_ENTRY *Flink;
@@ -346,6 +401,11 @@ typedef struct tagWNDCLASSEXA
 } WNDCLASSEXA, *PWNDCLASSEXA, *NPWNDCLASSEXA, *LPWNDCLASSEXA;
 typedef WNDCLASSEXA WNDCLASSEX;
 typedef PWNDCLASSEXA PWNDCLASSEX;
+typedef enum PROCESS_DPI_AWARENESS {
+    PROCESS_DPI_UNAWARE = 0,
+    PROCESS_SYSTEM_DPI_AWARE = 1,
+    PROCESS_PER_MONITOR_DPI_AWARE = 2
+} PROCESS_DPI_AWARENESS;
 
 
 typedef struct _SYSTEM_INFO
@@ -369,6 +429,7 @@ typedef struct _SYSTEM_INFO
 	WORD wProcessorRevision;
 } SYSTEM_INFO, *LPSYSTEM_INFO;
 
+typedef long HRESULT;
 
 typedef struct _OVERLAPPED
 {
@@ -477,6 +538,7 @@ typedef struct _WIN32_FIND_DATAA* LPWIN32_FIND_DATAA;
 extern "C" {
 
 
+DWORD WINAPI XInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState);
 int PASCAL closesocket(SOCKET s);
 int PASCAL WSAStartup(WORD wVersionRequired, LPWSADATA lpWSAData);
 SOCKET PASCAL socket(int af, int type, int protocol);
@@ -617,7 +679,13 @@ WINBASEAPI VOID WINAPI OutputDebugStringA(LPCSTR lpOutputString);
 WINBASEAPI DWORD WINAPI GetFileAttributesA(LPCSTR lpFileName);
 WINUSERAPI BOOL WINAPI OpenClipboard(HWND hWndNewOwner);
 WINUSERAPI HANDLE WINAPI SetClipboardData(UINT uFormat, HANDLE hMem);
-
+WINBASEAPI VOID WINAPI DebugBreak(VOID);
+BOOL IMAGEAPI SymInitialize(HANDLE hProcess, PCSTR UserSearchPath, BOOL fInvadeProcess);
+BOOL IMAGEAPI SymCleanup(HANDLE hProcess);
+BOOL IMAGEAPI SymRefreshModuleList(HANDLE hProcess);
+BOOL IMAGEAPI SymFromAddr(HANDLE hProcess, DWORD64 Address, PDWORD64 Displacement, PSYMBOL_INFO Symbol);
+BOOL IMAGEAPI SymGetLineFromAddr64(HANDLE hProcess, DWORD64 qwAddr, PDWORD pdwDisplacement, PIMAGEHLP_LINE64 Line64);
+NTSYSAPI WORD NTAPI RtlCaptureStackBackTrace(DWORD FramesToSkip, DWORD FramesToCapture, PVOID* BackTrace, PDWORD BackTraceHash);
 WINBASEAPI HGLOBAL WINAPI LoadResource(HMODULE hModule, HRSRC hResInfo);
 WINBASEAPI HRSRC WINAPI FindResourceA(HMODULE hModule, LPCSTR lpName, LPCSTR lpType);
 WINBASEAPI DWORD WINAPI SizeofResource(HMODULE hModule, HRSRC hResInfo);
@@ -628,5 +696,7 @@ LPVOID WINAPI CreateFiber(SIZE_T dwStackSize, LPFIBER_START_ROUTINE lpStartAddre
 LPVOID WINAPI ConvertThreadToFiber(LPVOID lpParameter);
 WINBASEAPI VOID WINAPI SwitchToFiber(LPVOID lpFiber);
 WINBASEAPI VOID WINAPI DeleteFiber(PVOID lpFiber);
+HRESULT WINAPI SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value);
+DECLSPEC_IMPORT BOOL WINAPI SetProcessDPIAware(VOID);
 
 } // extern "C"

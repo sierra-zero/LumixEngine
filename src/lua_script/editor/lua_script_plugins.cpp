@@ -14,20 +14,19 @@
 #include "engine/file_system.h"
 #include "engine/allocator.h"
 #include "engine/log.h"
-#include "engine/lua_wrapper.h"
 #include "engine/os.h"
 #include "engine/path.h"
-#include "engine/reflection.h"
 #include "engine/stream.h"
 #include "engine/universe.h"
 #include "lua_script/lua_script.h"
 #include "lua_script/lua_script_system.h"
+#include <lua.hpp>
 
 
 using namespace Lumix;
 
 
-static const ComponentType LUA_SCRIPT_TYPE = Reflection::getComponentType("lua_script");
+static const ComponentType LUA_SCRIPT_TYPE = reflection::getComponentType("lua_script");
 
 
 namespace
@@ -66,20 +65,22 @@ struct AssetPlugin : AssetBrowser::IPlugin, AssetCompiler::IPlugin
 			if (ImGui::Button(ICON_FA_SAVE "Save"))
 			{
 				FileSystem& fs = m_app.getEngine().getFileSystem();
-				OS::OutputFile file;
-				if (!fs.open(script->getPath().c_str(), Ref(file)))
+				os::OutputFile file;
+				if (!fs.open(script->getPath().c_str(), file))
 				{
-					logWarning("Lua Script") << "Could not save " << script->getPath();
+					logWarning("Could not save ", script->getPath());
 					return;
 				}
 
-				file.write(m_text_buffer, stringLength(m_text_buffer));
+				if (!file.write(m_text_buffer, stringLength(m_text_buffer))) {
+					logError("Could not write ", script->getPath());
+				}
 				file.close();
 			}
 			ImGui::SameLine();
 		}
 		else {
-			ImGui::Text(ICON_FA_EXCLAMATION_TRIANGLE "File is too big to be edited here");
+			ImGui::Text(ICON_FA_EXCLAMATION_TRIANGLE "File is too big to be edited here, please use external editor");
 		}
 		if (ImGui::Button(ICON_FA_EXTERNAL_LINK_ALT "Open externally"))
 		{
@@ -119,11 +120,15 @@ struct ConsolePlugin final : StudioApp::GUIPlugin
 		, open(false)
 		, autocomplete(_app.getAllocator())
 	{
-		Action* action = LUMIX_NEW(app.getAllocator(), Action)("Script Console", "Toggle script console", "script_console");
-		action->func.bind<&ConsolePlugin::toggleOpen>(this);
-		action->is_selected.bind<&ConsolePlugin::isOpen>(this);
-		app.addWindowAction(action);
+		m_toggle_ui.init("Script Console", "Toggle script console", "script_console", "", true);
+		m_toggle_ui.func.bind<&ConsolePlugin::toggleOpen>(this);
+		m_toggle_ui.is_selected.bind<&ConsolePlugin::isOpen>(this);
+		app.addWindowAction(&m_toggle_ui);
 		buf[0] = '\0';
+	}
+
+	~ConsolePlugin() {
+		app.removeAction(&m_toggle_ui);
 	}
 
 	void onSettingsLoaded() override {
@@ -271,24 +276,27 @@ struct ConsolePlugin final : StudioApp::GUIPlugin
 
 				if (errors)
 				{
-					logError("Lua Script") << lua_tostring(L, -1);
+					logError(lua_tostring(L, -1));
 					lua_pop(L, 1);
 				}
 			}
 			ImGui::SameLine();
 			if (ImGui::Button("Execute file"))
 			{
-				char tmp[MAX_PATH_LENGTH] = {};
-				if (OS::getOpenFilename(Span(tmp), "Scripts\0*.lua\0", nullptr))
+				char tmp[LUMIX_MAX_PATH] = {};
+				if (os::getOpenFilename(Span(tmp), "Scripts\0*.lua\0", nullptr))
 				{
-					OS::InputFile file;
+					os::InputFile file;
 					IAllocator& allocator = app.getAllocator();
 					if (file.open(tmp))
 					{
 						size_t size = file.size();
 						Array<char> data(allocator);
 						data.resize((int)size);
-						file.read(&data[0], size);
+						if (!file.read(&data[0], size)) {
+							logError("Could not read ", tmp);
+							data.clear();
+						}
 						file.close();
 						lua_State* L = app.getEngine().getState();
 						bool errors = luaL_loadbuffer(L, &data[0], data.size(), tmp) != 0;
@@ -296,13 +304,13 @@ struct ConsolePlugin final : StudioApp::GUIPlugin
 
 						if (errors)
 						{
-							logError("Lua Script") << lua_tostring(L, -1);
+							logError(lua_tostring(L, -1));
 							lua_pop(L, 1);
 						}
 					}
 					else
 					{
-						logError("Lua Script") << "Failed to open file " << tmp;
+						logError("Failed to open file ", tmp);
 					}
 				}
 			}
@@ -318,7 +326,7 @@ struct ConsolePlugin final : StudioApp::GUIPlugin
 			if (open_autocomplete)
 			{
 				ImGui::OpenPopup("autocomplete");
-				ImGui::SetNextWindowPos(ImGui::GetOsImePosRequest());
+				ImGui::SetNextWindowPos(ImGuiEx::GetOsImePosRequest());
 			}
 			open_autocomplete = false;
 			if (ImGui::BeginPopup("autocomplete"))
@@ -348,6 +356,7 @@ struct ConsolePlugin final : StudioApp::GUIPlugin
 
 
 	StudioApp& app;
+	Action m_toggle_ui;
 	Array<String> autocomplete;
 	bool open;
 	bool open_autocomplete = false;
@@ -369,15 +378,15 @@ struct AddComponentPlugin final : StudioApp::IAddComponentPlugin
 	{
 		ImGui::SetNextWindowSize(ImVec2(300, 300));
 		if (!ImGui::BeginMenu(getLabel())) return;
-		char buf[MAX_PATH_LENGTH];
+		char buf[LUMIX_MAX_PATH];
 		AssetBrowser& asset_browser = app.getAssetBrowser();
 		bool new_created = false;
 		if (ImGui::Selectable("New"))
 		{
-			char full_path[MAX_PATH_LENGTH];
-			if (OS::getSaveFilename(Span(full_path), "Lua script\0*.lua\0", "lua"))
+			char full_path[LUMIX_MAX_PATH];
+			if (os::getSaveFilename(Span(full_path), "Lua script\0*.lua\0", "lua"))
 			{
-				OS::OutputFile file;
+				os::OutputFile file;
 				FileSystem& fs = app.getEngine().getFileSystem();
 				if(fs.makeRelative(Span(buf), full_path)) {
 					if (file.open(full_path))
@@ -387,18 +396,18 @@ struct AddComponentPlugin final : StudioApp::IAddComponentPlugin
 					}
 					else
 					{
-						logError("Lua Script") << "Failed to create " << buf;
+						logError("Failed to create ", buf);
 					}
 				}
 				else {
-					logError("Renderer") << "Can not create " << full_path << " because it's not in root directory.";
+					logError("Can not create ", full_path, " because it's not in root directory.");
 				}
 			}
 		}
 		bool create_empty = ImGui::Selectable("Empty", false);
 
 		static u32 selected_res_hash = 0;
-		if (asset_browser.resourceList(Span(buf), Ref(selected_res_hash), LuaScript::TYPE, 0, false) || create_empty || new_created)
+		if (asset_browser.resourceList(Span(buf), selected_res_hash, LuaScript::TYPE, 0, false) || create_empty || new_created)
 		{
 			WorldEditor& editor = app.getWorldEditor();
 			if (create_entity)
@@ -415,7 +424,7 @@ struct AddComponentPlugin final : StudioApp::IAddComponentPlugin
 			}
 
 			const ComponentUID cmp = editor.getUniverse()->getComponent(entity, LUA_SCRIPT_TYPE);
-			editor.beginCommandGroup(crc32("add_lua_script"));
+			editor.beginCommandGroup("add_lua_script");
 			editor.addArrayPropertyItem(cmp, "scripts");
 
 			if (!create_empty) {
@@ -439,11 +448,28 @@ struct AddComponentPlugin final : StudioApp::IAddComponentPlugin
 	StudioApp& app;
 };
 
+struct PropertyGridPlugin final : PropertyGrid::IPlugin
+{
+	void onGUI(PropertyGrid& grid, ComponentUID cmp) override {
+		if (cmp.type != LUA_SCRIPT_TYPE) return;
+
+		LuaScriptScene* scene = (LuaScriptScene*)cmp.scene; 
+		const EntityRef e = (EntityRef)cmp.entity;
+		const u32 count = scene->getScriptCount(e);
+		for (u32 i = 0; i < count; ++i) {
+			if (scene->beginFunctionCall(e, i, "onGUI")) {
+				scene->endFunctionCall();
+			}
+		}
+	}
+};
 
 struct StudioAppPlugin : StudioApp::IPlugin
 {
 	StudioAppPlugin(StudioApp& app)
 		: m_app(app)
+		, m_asset_plugin(app)
+		, m_console_plugin(app)
 	{
 	}
 
@@ -453,29 +479,24 @@ struct StudioAppPlugin : StudioApp::IPlugin
 	{
 		IAllocator& allocator = m_app.getAllocator();
 
-		m_add_component_plugin = LUMIX_NEW(allocator, AddComponentPlugin)(m_app);
-		m_app.registerComponent(ICON_FA_MOON, "lua_script", *m_add_component_plugin);
+		AddComponentPlugin* add_cmp_plugin = LUMIX_NEW(m_app.getAllocator(), AddComponentPlugin)(m_app);
+		m_app.registerComponent(ICON_FA_MOON, "lua_script", *add_cmp_plugin);
 
-		m_asset_plugin = LUMIX_NEW(allocator, AssetPlugin)(m_app);
-		m_app.getAssetBrowser().addPlugin(*m_asset_plugin);
 		const char* exts[] = { "lua", nullptr };
-		m_app.getAssetCompiler().addPlugin(*m_asset_plugin, exts);
-
-		m_console_plugin = LUMIX_NEW(allocator, ConsolePlugin)(m_app);
-		m_app.addPlugin(*m_console_plugin);
+		m_app.getAssetCompiler().addPlugin(m_asset_plugin, exts);
+		m_app.getAssetBrowser().addPlugin(m_asset_plugin);
+		m_app.addPlugin(m_console_plugin);
+		m_app.getPropertyGrid().addPlugin(m_property_grid_plugin);
 	}
-
 
 	~StudioAppPlugin()
 	{
 		IAllocator& allocator = m_app.getAllocator();
 		
-		m_app.getAssetCompiler().removePlugin(*m_asset_plugin);
-		m_app.getAssetBrowser().removePlugin(*m_asset_plugin);
-		LUMIX_DELETE(allocator, m_asset_plugin);
-
-		m_app.removePlugin(*m_console_plugin);
-		LUMIX_DELETE(allocator, m_console_plugin);
+		m_app.getAssetCompiler().removePlugin(m_asset_plugin);
+		m_app.getAssetBrowser().removePlugin(m_asset_plugin);
+		m_app.removePlugin(m_console_plugin);
+		m_app.getPropertyGrid().removePlugin(m_property_grid_plugin);
 	}
 
 	bool showGizmo(UniverseView& view, ComponentUID cmp) override
@@ -497,9 +518,9 @@ struct StudioAppPlugin : StudioApp::IPlugin
 	}
 	
 	StudioApp& m_app;
-	AddComponentPlugin* m_add_component_plugin;
-	AssetPlugin* m_asset_plugin;
-	ConsolePlugin* m_console_plugin;
+	AssetPlugin m_asset_plugin;
+	ConsolePlugin m_console_plugin;
+	PropertyGridPlugin m_property_grid_plugin;
 };
 
 

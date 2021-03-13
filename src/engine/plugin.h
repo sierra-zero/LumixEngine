@@ -9,13 +9,14 @@ namespace Lumix
 
 template <typename T> struct Array;
 template <typename T> struct DelegateList;
+template <typename T> struct UniquePtr;
 
 struct LUMIX_ENGINE_API PluginManager
 {
 	virtual ~PluginManager() {}
 
-	static PluginManager* create(struct Engine& engine);
-	static void destroy(PluginManager* manager);
+	static UniquePtr<PluginManager> create(struct Engine& engine);
+	static void createAllStatic(Engine& engine);
 	
 	virtual void initPlugins() = 0;
 	virtual void unload(struct IPlugin* plugin) = 0;
@@ -35,7 +36,7 @@ struct LUMIX_ENGINE_API IScene
 
 	virtual void init() {}
 	virtual void serialize(struct OutputMemoryStream& serializer) = 0;
-	virtual void deserialize(struct InputMemoryStream& serialize, const struct EntityMap& entity_map) = 0;
+	virtual void deserialize(struct InputMemoryStream& serialize, const struct EntityMap& entity_map, i32 version) = 0;
 	virtual IPlugin& getPlugin() const = 0;
 	virtual void update(float time_delta, bool paused) = 0;
 	virtual void lateUpdate(float time_delta, bool paused) {}
@@ -60,23 +61,8 @@ struct LUMIX_ENGINE_API IPlugin
 	virtual void pluginAdded(IPlugin& plugin) {}
 
 	virtual void createScenes(Universe&) {}
-	virtual void destroyScene(IScene*) { ASSERT(false); }
 	virtual void startGame() {}
 	virtual void stopGame() {}
-};
-
-
-struct LUMIX_ENGINE_API StaticPluginRegister
-{
-	using Creator = IPlugin* (*)(struct Engine& engine);
-	StaticPluginRegister(const char* name, Creator creator);
-	
-	static IPlugin* create(const char* name, Engine& engine);
-	static void createAll(Engine& engine);
-
-	StaticPluginRegister* next;
-	Creator creator;
-	const char* name;
 };
 
 
@@ -84,13 +70,8 @@ struct LUMIX_ENGINE_API StaticPluginRegister
 
 
 #ifdef STATIC_PLUGINS
-	#define LUMIX_PLUGIN_ENTRY(plugin_name)                                           \
-		extern "C" IPlugin* createPlugin_##plugin_name(Engine& engine); \
-		extern "C" { StaticPluginRegister LUMIX_ATTRIBUTE_USED s_##plugin_name##_plugin_register(          \
-			#plugin_name, createPlugin_##plugin_name); }                              \
-		extern "C" IPlugin* createPlugin_##plugin_name(Engine& engine)
+	#define LUMIX_PLUGIN_ENTRY(plugin_name) extern "C" IPlugin* createPlugin_##plugin_name(Engine& engine)
 #else
-	#define LUMIX_PLUGIN_ENTRY(plugin_name) \
-		extern "C" LUMIX_LIBRARY_EXPORT IPlugin* createPlugin(Engine& engine)
+	#define LUMIX_PLUGIN_ENTRY(plugin_name) extern "C" LUMIX_LIBRARY_EXPORT IPlugin* createPlugin(Engine& engine)
 #endif
 

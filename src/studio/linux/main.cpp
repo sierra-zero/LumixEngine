@@ -3,8 +3,8 @@
 
 int main(int argc, char* argv[])
 {
+	Lumix::os::setCommandLine(argc, argv);
 	auto* app = Lumix::StudioApp::create();
-	Lumix::OS::setCommandLine(argc, argv);
 	app->run();
 	int exit_code = app->getExitCode();
 	Lumix::StudioApp::destroy(*app);

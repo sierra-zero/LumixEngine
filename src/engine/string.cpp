@@ -5,6 +5,23 @@
 
 namespace Lumix
 {
+	
+bool isLetter(char c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+
+bool isNumeric(char c)
+{
+	return c >= '0' && c <= '9';
+}
+
+
+bool isUpperCase(char c)
+{
+	return c >= 'A' && c <= 'Z';
+}
 
 
 String::String(IAllocator& allocator)
@@ -337,8 +354,6 @@ int stringLength(const char* str)
 	return (int)strlen(str);
 }
 
-
-
 bool endsWith(const char* str, const char* substr)
 {
 	int len = stringLength(str);
@@ -440,7 +455,7 @@ bool copyString(Span<char> dst, Span<const char> src)
 {
 	if (dst.length() < 1) return false;
 	if (src.length() < 1) {
-		dst.m_begin = dst.m_end = nullptr;
+		*dst.m_begin = 0;
 		return true;
 	}
 
@@ -521,6 +536,18 @@ bool catString(Span<char> destination, const char* source)
 	return copyString(Span(dst, length), source);
 }
 
+bool catString(Span<char> destination, Span<const char> source)
+{
+	char* dst = destination.begin();
+	u32 length = destination.length();
+	while (*dst && length)
+	{
+		--length;
+		++dst;
+	}
+	return copyString(Span(dst, length), source);
+}
+
 static void reverse(char* str, int length)
 {
 	char* beg = str;
@@ -535,15 +562,15 @@ static void reverse(char* str, int length)
 	}
 }
 
-const char* fromCString(Span<const char> input, Ref<i32> value)
+const char* fromCString(Span<const char> input, i32& value)
 {
 	i64 val;
-	const char* ret = fromCString(input, Ref(val));
+	const char* ret = fromCString(input, val);
 	value = (i32)val;
 	return ret;
 }
 
-const char* fromCString(Span<const char> input, Ref<i64> value)
+const char* fromCString(Span<const char> input, i64& value)
 {
 	u32 length = input.length();
 	if (length > 0)
@@ -575,15 +602,15 @@ const char* fromCString(Span<const char> input, Ref<i64> value)
 	return nullptr;
 }
 
-const char* fromCString(Span<const char> input, Ref<u16> value)
+const char* fromCString(Span<const char> input, u16& value)
 {
 	u32 tmp;
-	const char* ret = fromCString(input, Ref(tmp));
+	const char* ret = fromCString(input, tmp);
 	value = u16(tmp);
 	return ret;
 }
 
-const char* fromCString(Span<const char> input, Ref<u32> value)
+const char* fromCString(Span<const char> input, u32& value)
 {
 	u32 length = input.length();
 	if (length > 0)
@@ -606,7 +633,7 @@ const char* fromCString(Span<const char> input, Ref<u32> value)
 	return nullptr;
 }
 
-const char* fromCStringOctal(Span<const char> input, Ref<u32> value)
+const char* fromCStringOctal(Span<const char> input, u32& value)
 {
 	u32 length = input.length();
 	if (length > 0)
@@ -627,7 +654,7 @@ const char* fromCStringOctal(Span<const char> input, Ref<u32> value)
 	return nullptr;
 }
 
-const char* fromCString(Span<const char> input, Ref<u64> value)
+const char* fromCString(Span<const char> input, u64& value)
 {
 	u32 length = input.length();
 	if (length > 0)
@@ -650,7 +677,7 @@ const char* fromCString(Span<const char> input, Ref<u64> value)
 	return nullptr;
 }
 
-const char* fromCString(Span<const char> input, Ref<bool> value)
+const char* fromCString(Span<const char> input, bool& value)
 {
 	value = equalIStrings(input, "true");
 	return input.end();

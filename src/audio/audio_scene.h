@@ -1,6 +1,7 @@
 #pragma once
 
 
+#include "engine/allocator.h"
 #include "engine/plugin.h"
 
 
@@ -49,42 +50,24 @@ struct AudioScene : IScene
 	using SoundHandle = i32;
 	static constexpr SoundHandle INVALID_SOUND_HANDLE = -1;
 
-	struct ClipInfo
-	{
-		Clip* clip;
-		char name[30];
-		u32 name_hash;
-		bool looped;
-		float volume = 1;
-	};
-
-	static AudioScene* createInstance(AudioSystem& system,
+	static UniquePtr<AudioScene> createInstance(AudioSystem& system,
 		Universe& universe,
 		struct IAllocator& allocator);
-	static void destroyInstance(AudioScene* scene);
-	static void registerLuaAPI(lua_State* L);
+	static void reflect(struct Engine& engine);
 
-	virtual u32 getClipCount() const = 0;
-	virtual const char* getClipName(u32 index) = 0;
-	virtual ClipInfo* getClipInfoByIndex(u32 index) = 0;
-	virtual ClipInfo* getClipInfo(u32 hash) = 0;
-	virtual ClipInfo* getClipInfo(const char* name) = 0;
-	virtual int getClipInfoIndex(ClipInfo* info) = 0;
-	virtual void addClip(const char* name, const Path& path) = 0;
-	virtual void removeClip(ClipInfo* clip) = 0;
-	virtual void setClip(u32 clip_id, const Path& path) = 0;
+	virtual void setMasterVolume(float volume) = 0;
 
 	virtual EchoZone& getEchoZone(EntityRef entity) = 0;
 	virtual ChorusZone& getChorusZone(EntityRef entity) = 0;
 
-	virtual ClipInfo* getAmbientSoundClip(EntityRef entity) = 0;
-	virtual int getAmbientSoundClipIndex(EntityRef entity) = 0;
-	virtual void setAmbientSoundClipIndex(EntityRef entity, int index) = 0;
-	virtual void setAmbientSoundClip(EntityRef entity, ClipInfo* clip) = 0;
+	virtual Path getAmbientSoundClip(EntityRef entity) = 0;
+	virtual void setAmbientSoundClip(EntityRef entity, const Path& clip) = 0;
 	virtual bool isAmbientSound3D(EntityRef entity) = 0;
 	virtual void setAmbientSound3D(EntityRef entity, bool is_3d) = 0;
+	virtual void pauseAmbientSound(EntityRef entity) = 0;
+	virtual void resumeAmbientSound(EntityRef entity) = 0;
 
-	virtual SoundHandle play(EntityRef entity, ClipInfo* clip, bool is_3d) = 0;
+	virtual SoundHandle play(EntityRef entity, const Path& clip, bool is_3d) = 0;
 	virtual void stop(SoundHandle sound_id) = 0;
 	virtual void setVolume(SoundHandle sound_id, float volume) = 0;
 

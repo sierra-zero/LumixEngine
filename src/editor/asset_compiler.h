@@ -5,32 +5,13 @@ struct lua_State;
 #include "engine/hash_map.h"
 #include "engine/resource.h"
 
-namespace Lumix
-{
+namespace Lumix {
 
-
-struct OutputMemoryStream;
-struct Path;
-struct ResourceType;
 struct StudioApp;
-template <typename T> struct Array;
-template <typename T> struct DelegateList;
 
 
-template<>
-struct HashFunc<ResourceType>
-{
-	static u32 get(const ResourceType& key)
-	{
-		return HashFunc<u32>::get(key.type);
-	}
-};
-
-
-struct LUMIX_EDITOR_API AssetCompiler
-{
-	struct LUMIX_EDITOR_API IPlugin
-	{
+struct LUMIX_EDITOR_API AssetCompiler {
+	struct LUMIX_EDITOR_API IPlugin {
 		virtual ~IPlugin() {}
 		virtual bool compile(const Path& src) = 0;
 		virtual void addSubresources(AssetCompiler& compiler, const char* path);
@@ -42,12 +23,11 @@ struct LUMIX_EDITOR_API AssetCompiler
 		u32 dir_hash;
 	};
 
-	static AssetCompiler* create(StudioApp& app);
-	static void destroy(AssetCompiler& compiler);
-
-	virtual void onInitFinished() = 0;
+	static UniquePtr<AssetCompiler> create(StudioApp& app);
 
 	virtual ~AssetCompiler() {}
+
+	virtual void onInitFinished() = 0;
 	virtual void onGUI() = 0;
 	virtual void update() = 0;
 	virtual void addPlugin(IPlugin& plugin, const char** extensions) = 0;
@@ -63,7 +43,7 @@ struct LUMIX_EDITOR_API AssetCompiler
 	virtual bool writeCompiledResource(const char* locator, Span<const u8> data) = 0;
 	virtual bool copyCompile(const Path& src) = 0;
 	virtual DelegateList<void()>& listChanged() = 0;
-
+	virtual void onBasePathChanged() = 0;
 	virtual ResourceType getResourceType(const char* path) const = 0;
 	virtual void registerExtension(const char* extension, ResourceType type) = 0;
 	virtual bool acceptExtension(const char* ext, ResourceType type) const = 0;

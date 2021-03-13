@@ -8,6 +8,7 @@
 	#include <xmmintrin.h>
 #else
 	#include <math.h>
+	#include <string.h>
 #endif
 
 namespace Lumix
@@ -35,13 +36,39 @@ namespace Lumix
 		return _mm_set_ps1(value);
 	}
 
+	LUMIX_FORCE_INLINE float f4GetX(float4 v)
+	{
+		return _mm_cvtss_f32(v);
+	}
+
+	LUMIX_FORCE_INLINE float f4GetY(float4 v)
+	{
+		float4 r = _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 1));
+		return _mm_cvtss_f32(r);
+	}
+
+	LUMIX_FORCE_INLINE float f4GetZ(float4 v)
+	{
+		float4 r = _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 2));
+		return _mm_cvtss_f32(r);
+	}
+
+	LUMIX_FORCE_INLINE float f4GetW(float4 v)
+	{
+		float4 r = _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 3));
+		return _mm_cvtss_f32(r);
+	}
 
 	LUMIX_FORCE_INLINE void f4Store(void* dest, float4 src)
 	{
 		_mm_store_ps((float*)dest, src);
 	}
 
-
+	LUMIX_FORCE_INLINE float4 f4CmpGT(float4 a, float4 b)
+	{
+		return _mm_cmpgt_ps(a, b);
+	}
+	
 	LUMIX_FORCE_INLINE int f4MoveMask(float4 a)
 	{
 		return _mm_movemask_ps(a);
@@ -126,11 +153,50 @@ namespace Lumix
 	}
 
 
+	LUMIX_FORCE_INLINE float f4GetX(float4 v)
+	{
+		return v.x;
+	}
+
+
+	LUMIX_FORCE_INLINE float f4GetY(float4 v)
+	{
+		return v.y;
+	}
+
+
+	LUMIX_FORCE_INLINE float f4GetZ(float4 v)
+	{
+		return v.z;
+	}
+
+
+	LUMIX_FORCE_INLINE float f4GetW(float4 v)
+	{
+		return v.w;
+	}
+
+
 	LUMIX_FORCE_INLINE void f4Store(void* dest, float4 src)
 	{
 		(*(float4*)dest) = src;
 	}
 
+	LUMIX_FORCE_INLINE float4 f4CmpGT(float4 a, float4 b)
+	{
+		static const float gt = [](){
+			u32 u = 0xffFFffFF;
+			float f;
+			memcpy(&f, &u, sizeof(f));
+			return f;
+		}();
+		return {
+			a.x > b.x ? gt : 0,
+			a.y > b.y ? gt : 0,
+			a.z > b.z ? gt : 0,
+			a.w > b.w ? gt : 0
+		};
+	}
 
 	LUMIX_FORCE_INLINE int f4MoveMask(float4 a)
 	{

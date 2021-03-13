@@ -10,8 +10,6 @@
 #include "engine/resource_manager.h"
 #include "renderer/renderer.h"
 #include "renderer/texture.h"
-#include <lua.hpp>
-#include <lauxlib.h>
 
 
 namespace Lumix
@@ -28,7 +26,7 @@ u32 Shader::Uniform::size() const {
 		case MATRIX4: return 64;
 		case COLOR: return 16;
 		case VEC2: return 8;
-		case VEC3: return 12;
+		case VEC3: return 16; // pad to vec4
 		case VEC4: return 16;	
 	}
 	ASSERT(false);
@@ -63,42 +61,6 @@ bool Shader::hasDefine(u8 define) const {
 
 void Shader::compile(gpu::ProgramHandle program, gpu::VertexDecl decl, u32 defines, const Sources& sources, Renderer& renderer) {
 	PROFILE_BLOCK("compile_shader");
-	static const char* shader_code_prefix = 
-		R"#(
-		layout (std140, binding = 0) uniform GlobalState {
-			mat4 u_shadow_view_projection;
-			mat4 u_shadowmap_matrices[4];
-			mat4 u_camera_projection;
-			mat4 u_camera_inv_projection;
-			mat4 u_camera_view;
-			mat4 u_camera_inv_view;
-			mat4 u_camera_view_projection;
-			mat4 u_camera_inv_view_projection;
-			vec4 u_camera_world_pos;
-			vec4 u_light_direction;
-			vec4 u_light_color;
-			ivec2 u_framebuffer_size;
-			float u_light_intensity;
-			float u_light_indirect_intensity;
-			float u_time;
-			float u_frame_time_delta;
-			float u_shadow_near_plane;
-			float u_shadow_far_plane;
-		};
-		layout (std140, binding = 1) uniform PassState {
-			mat4 u_pass_projection;
-			mat4 u_pass_inv_projection;
-			mat4 u_pass_view;
-			mat4 u_pass_inv_view;
-			mat4 u_pass_view_projection;
-			mat4 u_pass_inv_view_projection;
-			vec4 u_pass_view_dir;
-			vec4 u_pass_camera_planes[6];
-		};
-		layout (std140, binding = 3) uniform ShadowAtlas {
-			mat4 u_shadow_atlas_matrices[128];
-		};
-		)#";
 
 	const char* codes[64];
 	gpu::ShaderType types[64];
@@ -110,18 +72,17 @@ void Shader::compile(gpu::ProgramHandle program, gpu::VertexDecl decl, u32 defin
 	const char* prefixes[35];
 	StaticString<128> defines_code[32];
 	int defines_count = 0;
-	prefixes[0] = shader_code_prefix;
 	if (defines != 0) {
 		for(int i = 0; i < sizeof(defines) * 8; ++i) {
 			if((defines & (1 << i)) == 0) continue;
 			defines_code[defines_count] << "#define " << renderer.getShaderDefine(i) << "\n";
-			prefixes[1 + defines_count] = defines_code[defines_count];
+			prefixes[defines_count] = defines_code[defines_count];
 			++defines_count;
 		}
 	}
-	prefixes[1 + defines_count] = sources.common.length() == 0 ? "" : sources.common.c_str();
+	prefixes[defines_count] = sources.common.length() == 0 ? "" : sources.common.c_str();
 
-	gpu::createProgram(program, decl, codes, types, sources.stages.size(), prefixes, 2 + defines_count, sources.path.c_str());
+	gpu::createProgram(program, decl, codes, types, sources.stages.size(), prefixes, 1 + defines_count, sources.path.c_str());
 }
 
 gpu::ProgramHandle Shader::getProgram(const gpu::VertexDecl& decl, u32 defines) {
@@ -158,6 +119,9 @@ int ignore_property(lua_State* L) {
 	else if (equalIStrings(name, "emission")) {
 		shader->ignoreProperty(Shader::EMISSION);
 	}
+	else if (equalIStrings(name, "translucency")) {
+		shader->ignoreProperty(Shader::TRANSLUCENCY);
+	}
 	else if (equalIStrings(name, "color")) {
 		shader->ignoreProperty(Shader::COLOR);
 	}
@@ -187,6 +151,7 @@ int uniform(lua_State* L)
 	Shader::Uniform& u = shader->m_uniforms.emplace();
 	copyString(u.name, name);
 	u.name_hash = crc32(name);
+	memset(&u.default_value, 0, sizeof(u.default_value));
 	const struct {
 		const char* str;
 		Shader::Uniform::Type type;
@@ -210,9 +175,27 @@ int uniform(lua_State* L)
 	}
 
 	if (!valid) {
-		logError("Renderer") << "Unknown uniform type " << type << " in " << shader->getPath().c_str();
+		logError("Unknown uniform type ", type, " in ", shader->getPath());
 		shader->m_uniforms.pop();
 		return 0;
+	}
+
+	if (lua_gettop(L) > 2) {
+		switch (lua_type(L, 3)) {
+			case LUA_TNUMBER: u.default_value.float_value = LuaWrapper::toType<float>(L, 3); break;
+			case LUA_TTABLE: {
+				const size_t len = lua_objlen(L, 2);
+				switch (len) {
+					case 2:	*(Vec2*)u.default_value.vec2 = LuaWrapper::toType<Vec2>(L, 3); break;
+					case 3: *(Vec3*)u.default_value.vec3 = LuaWrapper::toType<Vec3>(L, 3); break;
+					case 4: *(Vec4*)u.default_value.vec4 = LuaWrapper::toType<Vec4>(L, 3); break;
+					case 16: *(Matrix*)u.default_value.vec4 = LuaWrapper::toType<Matrix>(L, 3); break;
+					default: luaL_error(L, "Uniform %s has unsupported type", name); break;
+				}
+				break;
+			}
+			default: luaL_error(L, "Uniform %s has unsupported type", name); break;
+		}
 	}
 
 	// TODO std140 layout
@@ -245,14 +228,14 @@ int texture_slot(lua_State* L)
 	Shader* shader = getShader(L);
 
 	if(shader->m_texture_slot_count >= lengthOf(shader->m_texture_slots)) {
-		logError("Renderer") << "Too many texture slots in " << shader->getPath();
+		logError("Too many texture slots in ", shader->getPath());
 		return 0;
 	}
 
 	Shader::TextureSlot& slot = shader->m_texture_slots[shader->m_texture_slot_count];
 	LuaWrapper::getOptionalStringField(L, -1, "name", Span(slot.name));
 
-	char tmp[MAX_PATH_LENGTH];
+	char tmp[LUMIX_MAX_PATH];
 	if(LuaWrapper::getOptionalStringField(L, -1, "default_texture", Span(tmp))) {
 		ResourceManagerHub& manager = shader->getResourceManager().getOwner();
 		slot.default_texture = manager.load<Texture>(Path(tmp));
@@ -355,8 +338,8 @@ int include(lua_State* L)
 	FileSystem& fs = shader->m_renderer.getEngine().getFileSystem();
 
 	OutputMemoryStream content(shader->m_allocator);
-	if (!fs.getContentSync(Path(path), Ref(content))) {
-		logError("Renderer") << "Failed to open/read include " << path << " included from " << shader->getPath();
+	if (!fs.getContentSync(Path(path), content)) {
+		logError("Failed to open/read include ", path, " included from ", shader->getPath());
 		return 0;
 	}
 	
@@ -426,7 +409,7 @@ void Shader::unload()
 	for (u32 i = 0; i < m_texture_slot_count; ++i) {
 		if (m_texture_slots[i].default_texture) {
 			Texture* t = m_texture_slots[i].default_texture;
-			t->getResourceManager().unload(*t);
+			t->decRefCount();
 			m_texture_slots[i].default_texture = nullptr;
 		}
 	}
@@ -441,7 +424,7 @@ static const char* toString(Shader::Uniform::Type type) {
 		case Shader::Uniform::INT: return "int";
 		case Shader::Uniform::MATRIX4: return "mat4";
 		case Shader::Uniform::VEC2: return "vec2";
-		case Shader::Uniform::VEC3: return "vec3";
+		case Shader::Uniform::VEC3: return "vec4"; // vec4 because of padding padding
 		case Shader::Uniform::VEC4: return "vec4";
 		default: ASSERT(false); return "unknown_type";
 	}
@@ -478,6 +461,7 @@ void Shader::onBeforeReady() {
 			float u_roughness;
 			float u_metallic;
 			float u_emission;
+			float u_translucency;
 		)#");
 
 	for (const Uniform& u : m_uniforms) {

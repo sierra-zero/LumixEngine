@@ -1,4 +1,5 @@
 #define NOGDI
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #pragma warning (push)
 #pragma warning (disable: 4091) // declaration of 'xx' hides previous local declaration
@@ -6,7 +7,7 @@
 #pragma warning (pop)
 #include <mapi.h>
 
-#include "engine/allocator.h"
+#include "engine/allocators.h"
 #include "engine/crt.h"
 #include "engine/debug.h"
 #include "engine/log.h"
@@ -27,7 +28,7 @@ namespace Lumix
 {
 
 
-namespace Debug
+namespace debug
 {
 
 
@@ -124,7 +125,7 @@ StackNode* StackTree::getParent(StackNode* node)
 }
 
 
-bool StackTree::getFunction(StackNode* node, Span<char> out, Ref<int> line)
+bool StackTree::getFunction(StackNode* node, Span<char> out, int& line)
 {
 	HANDLE process = GetCurrentProcess();
 	alignas(SYMBOL_INFO) u8 symbol_mem[sizeof(SYMBOL_INFO) + 256 * sizeof(char)] = {};
@@ -211,8 +212,7 @@ StackNode* StackTree::record()
 	USHORT captured_frames_count = CaptureStackBackTrace(2, frames_to_capture, stack, 0);
 
 	void** ptr = stack + captured_frames_count - 1;
-	if (!m_root)
-	{
+	if (!m_root) {
 		m_root = LUMIX_NEW(stack_node_allocator, StackNode)();
 		m_root->m_instruction = *ptr;
 		m_root->m_first_child = nullptr;
@@ -264,6 +264,20 @@ static const u32 UNINITIALIZED_MEMORY_PATTERN = 0xCD;
 static const u32 FREED_MEMORY_PATTERN = 0xDD;
 static const u32 ALLOCATION_GUARD = 0xFDFDFDFD;
 
+void* GuardAllocator::allocate_aligned(size_t size, size_t align) {
+	const size_t pages = 1 + ((size + 4095) >> 12);
+	void* mem = VirtualAlloc(nullptr, pages * 4096, MEM_RESERVE, PAGE_READWRITE);
+	VirtualAlloc(mem, (pages - 1) * 4096, MEM_COMMIT, PAGE_READWRITE);
+	
+	if (align == 4096) return mem;
+
+	u8* ptr = (u8*)mem;
+	return (void*)(uintptr_t(ptr + (pages - 1) * 4096 - size) & ~size_t(align - 1));
+}
+
+void GuardAllocator::deallocate_aligned(void* ptr) {
+	VirtualFree((void*)((uintptr_t)ptr & ~(size_t)4095), 0, MEM_RELEASE);
+}
 
 Allocator::Allocator(IAllocator& source)
 	: m_source(source)
@@ -724,7 +738,7 @@ static LONG WINAPI unhandledExceptionHandler(LPEXCEPTION_POINTERS info)
 
 	HANDLE process = GetCurrentProcess();
 	SymInitialize(process, nullptr, TRUE);
-	Debug::StackTree::refreshModuleList();
+	debug::StackTree::refreshModuleList();
 
 	struct CrashInfo
 	{
@@ -742,14 +756,14 @@ static LONG WINAPI unhandledExceptionHandler(LPEXCEPTION_POINTERS info)
 			message << "\nCode: " << (u32)info->ExceptionRecord->ExceptionCode;
 			message << "\nAddress: " << (uintptr)info->ExceptionRecord->ExceptionAddress;
 			message << "\nBase: " << (uintptr)base;
-			OS::messageBox(message);
+			os::messageBox(message);
 		}
 		else
 		{
 			message.data[0] = '\0';
 		}
 
-		char minidump_path[MAX_PATH_LENGTH];
+		char minidump_path[LUMIX_MAX_PATH];
 		GetCurrentDirectory(sizeof(minidump_path), minidump_path);
 		catString(minidump_path, "\\minidump.dmp");
 
@@ -805,7 +819,7 @@ static LONG WINAPI unhandledExceptionHandler(LPEXCEPTION_POINTERS info)
 
 	StaticString<4096> message;
 	getStack(*info->ContextRecord, Span(message.data));
-	logError("Engine") << message;
+	logError(message);
 
 	return EXCEPTION_CONTINUE_SEARCH;
 }

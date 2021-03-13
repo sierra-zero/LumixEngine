@@ -3,16 +3,18 @@
 #include "engine.h"
 #include "file_system.h"
 #include "input_system.h"
+#include "log.h"
 #include "lua_wrapper.h"
+#include "plugin.h"
 #include "prefab.h"
 #include "reflection.h"
+#include "string.h"
 #include "universe.h"
-
+#include <lua.hpp>
 
 namespace Lumix {
-	
-namespace LuaImGui {
 
+namespace LuaImGui {
 
 int InputTextMultiline(lua_State* L)
 {
@@ -106,13 +108,6 @@ int SetStyleColor(lua_State* L)
 	color.z = LuaWrapper::checkArg<float>(L, 4);
 	color.w = LuaWrapper::checkArg<float>(L, 5);
 	style.Colors[index] = color;
-	return 0;
-}
-
-
-int ShowTestWindow(lua_State* L)
-{
-	ImGui::ShowDemoWindow();
 	return 0;
 }
 
@@ -250,7 +245,7 @@ int Separator(lua_State* L)
 
 void Rect(float w, float h, u32 color)
 {
-	ImGui::Rect(w, h, color);
+	ImGuiEx::Rect(w, h, color);
 }
 
 
@@ -292,6 +287,12 @@ int SetNextWindowSize(float w, float h)
 	return 0;
 }
 
+
+int OpenPopup(lua_State* L) {
+	auto* str_id = LuaWrapper::checkArg<const char*>(L, 1);
+	ImGui::OpenPopup(str_id);
+	return 0;
+}
 
 int Begin(lua_State* L)
 {
@@ -384,174 +385,10 @@ void registerCFunction(lua_State* L, const char* name, lua_CFunction f)
 } // namespace LuaImGui
 
 
-struct SetPropertyLuaVisitor : Reflection::IPropertyVisitor
-{
-	void visit(const Reflection::Property<float>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isnumber(L, -1))
-		{
-			float f = (float)lua_tonumber(L, -1);
-			prop.set(cmp, -1, f);
-		}
-	}
-
-	void visit(const Reflection::Property<int>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-
-		for (const Reflection::IAttribute* attr : prop.getAttributes()) {
-			if (attr->getType() == Reflection::IAttribute::ENUM) continue;
-			const auto* enum_attr = (const Reflection::EnumAttribute*)attr;
-			if (lua_isstring(L, -1)) {
-				const char* str = lua_tostring(L, -1);
-				for (int i = 0, c = enum_attr->count(cmp); i < c; ++i) {
-					if (equalStrings(enum_attr->name(cmp, i), str)) {
-						const int value = i;
-						prop.set(cmp, -1, value);
-					}
-				}
-			}
-			return;
-		}
-		if (lua_isnumber(L, -1))
-		{
-			int i = (int)lua_tointeger(L, -1);
-			prop.set(cmp, -1, i);
-		}
-	}
-
-
-	void visit(const Reflection::Property<u32>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isnumber(L, -1))
-		{
-			const u32 i = (u32)lua_tointeger(L, -1);
-			prop.set(cmp, -1, i);
-		}
-
-	}
-
-
-	void visit(const Reflection::Property<EntityPtr>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isnumber(L, -1))
-		{
-			EntityPtr e = {(int)lua_tointeger(L, -1)};
-			prop.set(cmp, -1, e);
-		}
-
-	}
-
-
-	void visit(const Reflection::Property<Vec2>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_istable(L, -1))
-		{
-			auto v = LuaWrapper::toType<Vec2>(L, -1);
-			prop.set(cmp, -1, v);
-		}
-	}
-
-
-	void visit(const Reflection::Property<Vec3>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_istable(L, -1))
-		{
-			auto v = LuaWrapper::toType<Vec3>(L, -1);
-			prop.set(cmp, -1, v);
-		}
-	}
-
-
-	void visit(const Reflection::Property<IVec3>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_istable(L, -1))
-		{
-			auto v = LuaWrapper::toType<IVec3>(L, -1);
-			prop.set(cmp, -1, v);
-		}
-	}
-
-
-	void visit(const Reflection::Property<Vec4>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_istable(L, -1))
-		{
-			auto v = LuaWrapper::toType<Vec4>(L, -1);
-			prop.set(cmp, -1, v);
-		}
-	}
-
-
-	void visit(const Reflection::Property<Path>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isstring(L, -1))
-		{
-			const char* str = lua_tostring(L, -1);
-			prop.set(cmp, -1, Path(str));
-		}
-	}
-
-
-	void visit(const Reflection::Property<bool>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isboolean(L, -1))
-		{
-			bool b = lua_toboolean(L, -1) != 0;
-			prop.set(cmp, -1, b);
-		}
-	}
-
-
-	void visit(const Reflection::Property<const char*>& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-		if (lua_isstring(L, -1))
-		{
-			const char* str = lua_tostring(L, -1);
-			prop.set(cmp, -1, str);
-		}
-	}
-
-
-	void visit(const Reflection::IArrayProperty& prop) override
-	{
-		if (!equalStrings(property_name, prop.name)) return;
-			
-		if (lua_istable(L, -1)) {
-			const int count = (int)lua_objlen(L, -1);
-			for (int i = 0; i < count; ++i) {
-				prop.addItem(cmp, prop.getCount(cmp));
-			}
-		}
-	}
-
-
-	void visit(const Reflection::IBlobProperty& prop) override {
-		if (!equalStrings(property_name, prop.name)) return;
-		logError("Lua Script") << "Property " << prop.name << " has unsupported type";
-	}
-
-
-	lua_State* L;
-	ComponentUID cmp;
-	const char* property_name;
-};
-
-
 static int LUA_packageLoader(lua_State* L)
 {
 	const char* module = LuaWrapper::toType<const char*>(L, 1);
-	StaticString<MAX_PATH_LENGTH> tmp(module);
+	StaticString<LUMIX_MAX_PATH> tmp(module);
 	tmp << ".lua";
 	lua_getglobal(L, "LumixAPI");
 	lua_getfield(L, -1, "engine");
@@ -560,14 +397,14 @@ static int LUA_packageLoader(lua_State* L)
 	lua_pop(L, 1);
 	auto& fs = engine->getFileSystem();
 	OutputMemoryStream buf(engine->getAllocator());
-	if (!fs.getContentSync(Path(tmp), Ref(buf))) {
-		logError("Engine") << "Failed to open file " << tmp;
-		StaticString<MAX_PATH_LENGTH + 40> msg("Failed to open file ");
+	if (!fs.getContentSync(Path(tmp), buf)) {
+		logError("Failed to open file ", tmp);
+		StaticString<LUMIX_MAX_PATH + 40> msg("Failed to open file ");
 		msg << tmp;
 		lua_pushstring(L, msg);
 	}
 	else if (luaL_loadbuffer(L, (const char*)buf.data(), buf.size(), tmp) != 0) {
-		logError("Engine") << "Failed to load package " << tmp << ": " << lua_tostring(L, -1);
+		logError("Failed to load package ", tmp, ": ", lua_tostring(L, -1));
 	}
 	return 1;
 }
@@ -577,7 +414,7 @@ static void installLuaPackageLoader(lua_State* L)
 {
 	lua_getglobal(L, "package");
 	if (lua_type(L, -1) != LUA_TTABLE) {
-		logError("Engine") << "Lua \"package\" is not a table";
+		logError("Lua \"package\" is not a table");
 		return;
 	}
 	lua_getfield(L, -1, "searchers");
@@ -585,7 +422,7 @@ static void installLuaPackageLoader(lua_State* L)
 		lua_pop(L, 1);
 		lua_getfield(L, -1, "loaders");
 		if (lua_type(L, -1) != LUA_TTABLE) {
-			logError("Engine") << "Lua \"package.searchers\"/\"package.loaders\" is not a table";
+			logError("Lua \"package.searchers\"/\"package.loaders\" is not a table");
 			return;
 		}
 	}
@@ -624,12 +461,12 @@ static void LUA_startGame(Engine* engine, Universe* universe)
 static bool LUA_createComponent(Universe* universe, i32 entity, const char* type)
 {
 	if (!universe) return false;
-	ComponentType cmp_type = Reflection::getComponentType(type);
+	ComponentType cmp_type = reflection::getComponentType(type);
 	IScene* scene = universe->getScene(cmp_type);
 	if (!scene) return false;
 	if (universe->hasComponent({entity}, cmp_type))
 	{
-		logError("Lua Script") << "Component " << type << " already exists in entity " << entity;
+		logError("Component ", type, " already exists in entity ", entity);
 		return false;
 	}
 
@@ -641,7 +478,7 @@ static bool LUA_createComponent(Universe* universe, i32 entity, const char* type
 static bool LUA_hasComponent(Universe* universe, i32 entity, const char* type)
 {
 	if (!universe) return false;
-	ComponentType cmp_type = Reflection::getComponentType(type);
+	ComponentType cmp_type = reflection::getComponentType(type);
 	IScene* scene = universe->getScene(cmp_type);
 	if (!scene) return false;
 	return universe->hasComponent({entity}, cmp_type);
@@ -656,21 +493,9 @@ static EntityRef LUA_createEntity(Universe* universe)
 
 static int LUA_getComponentType(const char* component_type)
 {
-	return Reflection::getComponentType(component_type).index;
+	return reflection::getComponentType(component_type).index;
 }
 
-
-static int LUA_getComponentTypesCount()
-{
-	return Reflection::getComponentTypesCount();
-}
-
-
-static int LUA_getComponentTypeByIndex(int index)
-{
-	const char* id = Reflection::getComponentTypeID(index);
-	return Reflection::getComponentType(id).index;
-}
 
 
 static int LUA_setEntityRotation(lua_State* L)
@@ -704,6 +529,13 @@ static IScene* LUA_getScene(Universe* universe, const char* name)
 static int LUA_loadResource(Engine* engine, const char* path, const char* type)
 {
 	return engine->addLuaResource(Path(path), ResourceType(type));
+}
+
+
+static const char* LUA_getResourcePath(Engine* engine, i32 resource_handle)
+{
+	Resource* res = engine->getLuaResource(resource_handle);
+	return res->getPath().c_str();
 }
 
 
@@ -775,7 +607,7 @@ static i32 LUA_getParent(Universe* universe, i32 entity)
 
 static void LUA_setParent(Universe* universe, i32 parent, i32 child)
 {
-	return universe->setParent({parent}, {child});
+	return universe->setParent(EntityPtr{parent}, EntityRef{child});
 }
 
 
@@ -793,8 +625,8 @@ static Universe* LUA_createUniverse(Engine* engine) { return &engine->createUniv
 static void LUA_destroyUniverse(Engine* engine, Universe* universe) { engine->destroyUniverse(*universe); }
 static void LUA_destroyEntity(Universe* universe, i32 entity) { universe->destroyEntity({entity}); }
 static Universe* LUA_getSceneUniverse(IScene* scene) { return &scene->getUniverse(); }
-static void LUA_logError(const char* text) { logError("Lua Script") << text; }
-static void LUA_logInfo(const char* text) { logInfo("Lua Script") << text; }
+static void LUA_logError(const char* text) { logError(text); }
+static void LUA_logInfo(const char* text) { logInfo(text); }
 static void LUA_pause(Engine* engine, bool pause) { engine->pause(pause); }
 static void LUA_nextFrame(Engine* engine) { engine->nextFrame(); }
 static void LUA_setTimeMultiplier(Engine* engine, float multiplier) { engine->setTimeMultiplier(multiplier); }
@@ -820,7 +652,7 @@ static int LUA_loadUniverse(lua_State* L)
 		{
 			if (!success)
 			{
-				logError("Engine") << "Failed to open universe " << path;
+				logError("Failed to open universe ", path);
 			}
 			else
 			{
@@ -838,9 +670,9 @@ static int LUA_loadUniverse(lua_State* L)
 				blob.read(&header, sizeof(header));
 
 				EntityMap entity_map(engine->getAllocator());
-				if (!engine->deserialize(*universe, blob, Ref(entity_map)))
+				if (!engine->deserialize(*universe, blob, entity_map))
 				{
-					logError("Engine") << "Failed to deserialize universe " << path;
+					logError("Failed to deserialize universe ", path);
 				}
 				else
 				{
@@ -852,7 +684,7 @@ static int LUA_loadUniverse(lua_State* L)
 
 					if (lua_pcall(L, 0, 0, 0) != 0)
 					{
-						logError("Engine") << lua_tostring(L, -1);
+						logError(lua_tostring(L, -1));
 						lua_pop(L, 1);
 					}
 				}
@@ -881,7 +713,7 @@ static int LUA_loadUniverse(lua_State* L)
 static int LUA_instantiatePrefab(lua_State* L) {
 	const int index = lua_upvalueindex(1);
 	if (!LuaWrapper::isType<Engine>(L, index)) {
-		logError("Lua") << "Invalid Lua closure";
+		logError("Invalid Lua closure");
 		ASSERT(false);
 		return 0;
 	}
@@ -902,7 +734,7 @@ static int LUA_instantiatePrefab(lua_State* L) {
 		luaL_error(L, "Prefab '%s' is not ready, preload it.", prefab->getPath().c_str());
 	}
 	EntityMap entity_map(engine->getAllocator());
-	if (engine->instantiatePrefab(*universe, *prefab, position, {0, 0, 0, 1}, 1, Ref(entity_map))) {
+	if (engine->instantiatePrefab(*universe, *prefab, position, {0, 0, 0, 1}, 1, entity_map)) {
 		LuaWrapper::pushEntity(L, entity_map.m_map[0], universe);
 		return 1;
 	}
@@ -926,8 +758,6 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	REGISTER_FUNCTION(destroyEntity);
 	REGISTER_FUNCTION(destroyUniverse);
 	//REGISTER_FUNCTION(getComponentType);
-	//REGISTER_FUNCTION(getComponentTypeByIndex);
-	//REGISTER_FUNCTION(getComponentTypesCount);
 	//REGISTER_FUNCTION(getEntityDirection);
 	REGISTER_FUNCTION(getEntityPosition);
 	REGISTER_FUNCTION(getEntityRotation);
@@ -940,6 +770,7 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	//REGISTER_FUNCTION(getSceneUniverse);
 	//REGISTER_FUNCTION(hasFilesystemWork);
 	REGISTER_FUNCTION(loadResource);
+	REGISTER_FUNCTION(getResourcePath);
 	REGISTER_FUNCTION(logError);
 	//REGISTER_FUNCTION(logInfo);
 	//REGISTER_FUNCTION(multMatrixVec);
@@ -1012,6 +843,7 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	LuaImGui::registerCFunction(L, "Dummy", &LuaWrapper::wrap<&LuaImGui::Dummy>);
 	LuaImGui::registerCFunction(L, "End", &LuaWrapper::wrap<&ImGui::End>);
 	LuaImGui::registerCFunction(L, "EndChildFrame", &LuaWrapper::wrap<&ImGui::EndChildFrame>);
+	LuaImGui::registerCFunction(L, "EndCombo", &LuaWrapper::wrap<&ImGui::EndCombo>);
 	LuaImGui::registerCFunction(L, "EndPopup", &LuaWrapper::wrap<&ImGui::EndPopup>);
 	LuaImGui::registerCFunction(L, "GetColumnWidth", &LuaWrapper::wrap<&ImGui::GetColumnWidth>);
 	LuaImGui::registerCFunction(L, "GetDisplayWidth", &LuaImGui::GetDisplayWidth);
@@ -1026,7 +858,7 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	LuaImGui::registerCFunction(L, "IsMouseDown", &LuaWrapper::wrap<&LuaImGui::IsMouseDown>);
 	LuaImGui::registerCFunction(L, "NewLine", &LuaWrapper::wrap<&ImGui::NewLine>);
 	LuaImGui::registerCFunction(L, "NextColumn", &LuaWrapper::wrap<&ImGui::NextColumn>);
-	LuaImGui::registerCFunction(L, "OpenPopup", &LuaWrapper::wrap<&ImGui::OpenPopup>);
+	LuaImGui::registerCFunction(L, "OpenPopup", &LuaImGui::OpenPopup);
 	LuaImGui::registerCFunction(L, "PopItemWidth", &LuaWrapper::wrap<&ImGui::PopItemWidth>);
 	LuaImGui::registerCFunction(L, "PopID", &LuaWrapper::wrap<&ImGui::PopID>);
 	LuaImGui::registerCFunction(L, "PopStyleColor", &LuaWrapper::wrap<&ImGui::PopStyleColor>);
@@ -1044,7 +876,6 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	LuaImGui::registerCFunction(L, "SetNextWindowPosCenter", &LuaImGui::SetNextWindowPosCenter);
 	LuaImGui::registerCFunction(L, "SetNextWindowSize", &LuaWrapper::wrap<&LuaImGui::SetNextWindowSize>);
 	LuaImGui::registerCFunction(L, "SetStyleColor", &LuaImGui::SetStyleColor);
-	LuaImGui::registerCFunction(L, "ShowTestWindow", &LuaImGui::ShowTestWindow);
 	LuaImGui::registerCFunction(L, "SliderFloat", &LuaImGui::SliderFloat);
 	LuaImGui::registerCFunction(L, "Text", &LuaImGui::Text);
 	LuaImGui::registerCFunction(L, "Unindent", &LuaWrapper::wrap<&ImGui::Unindent>);
@@ -1174,7 +1005,7 @@ void registerEngineAPI(lua_State* L, Engine* engine)
 	#define TO_STR_HELPER(x) #x
 	#define TO_STR(x) TO_STR_HELPER(x)
 	if (!LuaWrapper::execute(L, Span(entity_src, stringLength(entity_src)), __FILE__ "(" TO_STR(__LINE__) ")", 0)) {
-		logError("Engine") << "Failed to init entity api";
+		logError("Failed to init entity api");
 	}
 
 	installLuaPackageLoader(L);

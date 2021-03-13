@@ -2,8 +2,8 @@
 #include "engine/array.h"
 #include "engine/hash_map.h"
 #include "engine/resource.h"
+#include "engine/string.h"
 #include "gpu/gpu.h"
-#include "renderer/model.h"
 
 
 struct lua_State;
@@ -38,7 +38,8 @@ public:
 		COLOR,
 		ROUGHNESS,
 		METALLIC,
-		EMISSION
+		EMISSION,
+		TRANSLUCENCY
 	};
 
 	struct Uniform
@@ -54,6 +55,15 @@ public:
 			VEC4
 		};
 
+		union
+		{
+			float float_value;
+			float vec4[4];
+			float vec3[3];
+			float vec2[2];
+			float matrix[16];
+		} default_value;
+
 		char name[32];
 		u32 name_hash;
 		Type type;
@@ -63,6 +73,11 @@ public:
 
 	struct Stage {
 		Stage(IAllocator& allocator) : code(allocator) {}
+		Stage(const Stage& rhs)
+			: type(rhs.type)
+			, code(rhs.code.makeCopy())
+		{}
+
 		gpu::ShaderType type;
 		Array<char> code;
 	};
@@ -71,6 +86,11 @@ public:
 		Sources(IAllocator& allocator) 
 			: stages(allocator)
 			, common(allocator)
+		{}
+		Sources(const Sources& rhs)
+			: stages(rhs.stages.makeCopy())
+			, common(rhs.common)
+			, path(rhs.path)
 		{}
 
 		Path path;

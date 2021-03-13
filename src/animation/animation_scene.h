@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/allocator.h"
 #include "engine/lumix.h"
 #include "engine/plugin.h"
 
@@ -8,7 +9,7 @@ struct lua_State;
 namespace Lumix
 {
 
-namespace Anim { struct Controller; }
+namespace anim { struct Controller; }
 
 struct Animable {
 	Time time;
@@ -17,9 +18,8 @@ struct Animable {
 };
 
 struct AnimationScene : IScene {
-	static AnimationScene* create(Engine& engine, IPlugin& plugin, Universe& universe, struct IAllocator& allocator);
-	static void destroy(AnimationScene& scene);
-	static void registerLuaAPI(lua_State* L);
+	static UniquePtr<AnimationScene> create(Engine& engine, IPlugin& plugin, Universe& universe, struct IAllocator& allocator);
+	static void reflect(Engine& engine);
 
 	virtual const struct OutputMemoryStream& getEventStream() const = 0;
 	virtual struct Path getPropertyAnimation(EntityRef entity) = 0;
@@ -45,9 +45,10 @@ struct AnimationScene : IScene {
 	virtual void applyAnimatorSet(EntityRef entity, u32 idx) = 0;
 	virtual void setAnimatorDefaultSet(EntityRef entity, u32 idx) = 0;
 	virtual u32 getAnimatorDefaultSet(EntityRef entity) = 0;
-	virtual Anim::Controller* getAnimatorController(EntityRef entity) = 0;
+	virtual anim::Controller* getAnimatorController(EntityRef entity) = 0;
+	virtual void setAnimatorIK(EntityRef entity, u32 index, float weight, const struct Vec3& target) = 0;
 	virtual float getAnimationLength(int animation_idx) = 0;
 };
 
 
-} // ~ namespace Lumix
+} // namespace Lumix

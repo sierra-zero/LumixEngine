@@ -1,145 +1,87 @@
 #include "engine/reflection.h"
-#include "engine/crc32.h"
 #include "engine/allocator.h"
+#include "engine/allocators.h"
+#include "engine/crc32.h"
 #include "engine/log.h"
-
+#include "engine/stream.h"
+#include "engine/string.h"
+#include "engine/universe.h"
 
 namespace Lumix
 {
 
 
-namespace Reflection
+namespace reflection
 {
-
-
-template <> Path readFromStream<Path>(InputMemoryStream& stream)
-{
-	const char* c_str = (const char*)stream.getData() + stream.getPosition();
-	Path path(c_str);
-	stream.skip(stringLength(c_str) + 1);
-	return path;
-}
-
-
-template <> void writeToStream<const Path&>(OutputMemoryStream& stream, const Path& path)
-{
-	const char* str = path.c_str();
-	stream.write(str, stringLength(str) + 1);
-}
-
-
-template <> void writeToStream<Path>(OutputMemoryStream& stream, Path path)
-{
-	const char* str = path.c_str();
-	stream.write(str, stringLength(str) + 1);
-}
-
-
-template <> const char* readFromStream<const char*>(InputMemoryStream& stream)
-{
-	const char* c_str = (const char*)stream.getData() + stream.getPosition();
-	stream.skip(stringLength(c_str) + 1);
-	return c_str;
-}
-
-
-template <> void writeToStream<const char*>(OutputMemoryStream& stream, const char* value)
-{
-	stream.write(value, stringLength(value) + 1);
-}
-
-
-struct ComponentTypeData
-{
-	char id[50];
-	u32 id_hash;
+	
+struct Context {
+	Scene* first_scene = nullptr; 
+	RegisteredComponent ComponentBases[ComponentType::MAX_TYPES_COUNT];
+	u32 components_count = 0;
 };
 
+static Context& getContext() {
+	static Context ctx;
+	return ctx;
+}
 
+static IAllocator& getAllocator() {
+	static DefaultAllocator alloc;
+	return alloc;
+}
 
+Array<FunctionBase*>& allFunctions() {
+	static Array<FunctionBase*> fncs(getAllocator());
+	return fncs;
+}
 
-struct ComponentLink
-{
-	const ComponentBase* desc;
-	ComponentLink* next;
-};
+ComponentBase::ComponentBase(IAllocator& allocator)
+	: props(allocator)
+	, functions(allocator)
+{}
 
-
-static IAllocator* g_allocator = nullptr;
-static ComponentLink* g_first_component = nullptr;
-static SceneBase* g_first_scene = nullptr;
-
-
-const ComponentBase* getComponent(ComponentType cmp_type)
-{
-	ComponentLink* link = g_first_component;
-	while (link)
-	{
-		if (link->desc->component_type == cmp_type) return link->desc;
-		link = link->next;
+void ComponentBase::visit(IPropertyVisitor& visitor) const {
+	for (const PropertyBase* prop : props) {
+		prop->visit(visitor);
 	}
+}
 
+const ComponentBase* getComponent(ComponentType cmp_type) {
+	return getContext().ComponentBases[cmp_type.index].cmp;
+}
+
+const PropertyBase* getProperty(ComponentType cmp_type, const char* prop_name) {
+	const ComponentBase* cmp = getComponent(cmp_type);
+	for (PropertyBase* prop : cmp->props) {
+		if (equalStrings(prop->name, prop_name)) return prop;
+	}
 	return nullptr;
 }
 
+Scene::Scene(IAllocator& allocator)
+	: cmps(allocator)
+	, functions(allocator)
+{}
 
-void registerComponent(const ComponentBase& desc)
+builder::builder(IAllocator& allocator)
+	: allocator(allocator)
 {
-	ComponentLink* link = LUMIX_NEW(*g_allocator, ComponentLink);
-	link->next = g_first_component;
-	link->desc = &desc;
-	g_first_component = link;
+	scene = LUMIX_NEW(allocator, Scene)(allocator);
 }
 
-SceneBase* getFirstScene() { return g_first_scene; }
-
-void registerScene(SceneBase& scene) {
-	if(g_first_scene) scene.next = g_first_scene;
-	g_first_scene = &scene;
-
-	for (const ComponentBase* cmp : scene.getComponents()) {
-		registerComponent(*cmp);
-	}
+void builder::registerCmp(ComponentBase* cmp) {
+	cmp->scene = crc32(scene->name);
+	getContext().ComponentBases[cmp->component_type.index].cmp = cmp;
+	getContext().ComponentBases[cmp->component_type.index].name_hash = crc32(cmp->name);
+	getContext().ComponentBases[cmp->component_type.index].scene = crc32(scene->name);
+	scene->cmps.push(cmp);
 }
-
-
-static Array<ComponentTypeData>& getComponentTypes()
-{
-	static DefaultAllocator allocator;
-	static Array<ComponentTypeData> types(allocator);
-	return types;
-}
-
-
-void init(IAllocator& allocator)
-{
-	g_allocator = &allocator;
-}
-
-
-static void destroy(ComponentLink* link)
-{
-	if (!link) return;
-	destroy(link->next);
-	LUMIX_DELETE(*g_allocator, link);
-}
-
-
-void shutdown()
-{
-	destroy(g_first_component);
-	g_allocator = nullptr;
-}
-
 
 ComponentType getComponentTypeFromHash(u32 hash)
 {
-	auto& types = getComponentTypes();
-	for (int i = 0, c = types.size(); i < c; ++i)
-	{
-		if (types[i].id_hash == hash)
-		{
-			return {i};
+	for (u32 i = 0, c = getContext().components_count; i < c; ++i) {
+		if (getContext().ComponentBases[i].name_hash == hash) {
+			return {(i32)i};
 		}
 	}
 	ASSERT(false);
@@ -149,47 +91,170 @@ ComponentType getComponentTypeFromHash(u32 hash)
 
 u32 getComponentTypeHash(ComponentType type)
 {
-	return getComponentTypes()[type.index].id_hash;
+	return getContext().ComponentBases[type.index].name_hash;
 }
 
 
-ComponentType getComponentType(const char* id)
+ComponentType getComponentType(const char* name)
 {
-	u32 id_hash = crc32(id);
-	auto& types = getComponentTypes();
-	for (int i = 0, c = types.size(); i < c; ++i)
-	{
-		if (types[i].id_hash == id_hash)
-		{
-			return {i};
+	Context& ctx = getContext();
+	u32 name_hash = crc32(name);
+	for (u32 i = 0, c = ctx.components_count; i < c; ++i) {
+		if (ctx.ComponentBases[i].name_hash == name_hash) {
+			return {(i32)i};
 		}
 	}
 
-	auto& cmp_types = getComponentTypes();
-	if (types.size() == ComponentType::MAX_TYPES_COUNT)
-	{
-		logError("Engine") << "Too many component types";
+	if (ctx.components_count == ComponentType::MAX_TYPES_COUNT) {
+		logError("Too many component types");
 		return INVALID_COMPONENT_TYPE;
 	}
 
-	ComponentTypeData& type = cmp_types.emplace();
-	copyString(type.id, id);
-	type.id_hash = id_hash;
-	return {getComponentTypes().size() - 1};
+	RegisteredComponent& type = ctx.ComponentBases[getContext().components_count];
+	type.name_hash = name_hash;
+	++ctx.components_count;
+	return {i32(getContext().components_count - 1)};
 }
 
+Scene* getFirstScene() {
+	return getContext().first_scene;
+}
 
-int getComponentTypesCount()
+void DynamicProperties::visit(IPropertyVisitor& visitor) const { visitor.visit(*this); }
+
+Span<const RegisteredComponent> getComponents() {
+	return Span(getContext().ComponentBases, getContext().components_count);
+}
+
+struct RadiansAttribute : IAttribute
 {
-	return getComponentTypes().size();
-}
+	int getType() const override { return RADIANS; }
+};
 
-
-const char* getComponentTypeID(int index)
+struct MultilineAttribute : IAttribute
 {
-	return getComponentTypes()[index].id;
+	int getType() const override { return MULTILINE; }
+};
+
+struct NoUIAttribute : IAttribute {
+	int getType() const override { return NO_UI; }
+};
+
+builder build_scene(const char* name) {
+	builder res(getAllocator());
+	Context& ctx = getContext();
+	res.scene->next = ctx.first_scene;
+	ctx.first_scene = res.scene;
+	res.scene->name = name;
+	return res;
 }
 
+builder& builder::radiansAttribute() {
+	auto* a = LUMIX_NEW(allocator, RadiansAttribute);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::colorAttribute() {
+	auto* a = LUMIX_NEW(allocator, ColorAttribute);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::noUIAttribute() {
+	auto* a = LUMIX_NEW(allocator, NoUIAttribute);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::multilineAttribute() {
+	auto* a = LUMIX_NEW(allocator, MultilineAttribute);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::minAttribute(float value) {
+	auto* a = LUMIX_NEW(allocator, MinAttribute)(value);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::clampAttribute(float min, float max) {
+	auto* a = LUMIX_NEW(allocator, ClampAttribute)(min, max);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::resourceAttribute(ResourceType type) {
+	auto* a = LUMIX_NEW(allocator, ResourceAttribute)(type);
+	last_prop->attributes.push(a);
+	return *this;
+}
+
+builder& builder::end_array() {
+	array = nullptr;
+	last_prop = nullptr;
+	return *this;
+}
+
+builder& builder::icon(const char* icon) {
+	scene->cmps.back()->icon = icon;
+	return *this;
+}
+
+void builder::addProp(PropertyBase* p) {
+	if (array) {
+		array->children.push(p);
+	}
+	else {
+		scene->cmps.back()->props.push(p);
+	}
+	last_prop = p;
+}
+
+BlobProperty::BlobProperty(IAllocator& allocator)
+	: PropertyBase(allocator)
+{}
+
+void BlobProperty::visit(struct IPropertyVisitor& visitor) const {
+	visitor.visit(*this);
+}
+
+void BlobProperty::getValue(ComponentUID cmp, u32 idx, OutputMemoryStream& stream) const {
+	getter(cmp.scene, (EntityRef)cmp.entity, idx, stream);
+}
+
+void BlobProperty::setValue(ComponentUID cmp, u32 idx, InputMemoryStream& stream) const {
+	setter(cmp.scene, (EntityRef)cmp.entity, idx, stream);
+}
+
+ArrayProperty::ArrayProperty(IAllocator& allocator)
+	: PropertyBase(allocator)
+	, children(allocator)
+{}
+
+u32 ArrayProperty::getCount(ComponentUID cmp) const {
+	return counter(cmp.scene, (EntityRef)cmp.entity);
+}
+
+void ArrayProperty::addItem(ComponentUID cmp, u32 idx) const {
+	adder(cmp.scene, (EntityRef)cmp.entity, idx);
+}
+
+void ArrayProperty::removeItem(ComponentUID cmp, u32 idx) const {
+	remover(cmp.scene, (EntityRef)cmp.entity, idx);
+}
+
+
+void ArrayProperty::visit(struct IPropertyVisitor& visitor) const {
+	visitor.visit(*this);
+}
+
+void ArrayProperty::visitChildren(struct IPropertyVisitor& visitor) const {
+	for (PropertyBase* prop : children) {
+		prop->visit(visitor);
+	}
+}
 
 } // namespace Reflection
 

@@ -15,9 +15,8 @@
 #include "engine/path.h"
 #include "engine/prefab.h"
 #include "engine/profiler.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
-#include "engine/serializer.h"
+#include "engine/universe.h"
 #include "meshoptimizer/meshoptimizer.h"
 #include "mikktspace.h"
 #include "physics/physics_geometry.h"
@@ -29,17 +28,12 @@
 #include "renderer/shader.h"
 
 
-namespace Lumix
-{
-
-
-using PathBuilder = StaticString<MAX_PATH_LENGTH>;
-
+namespace Lumix {
 
 
 static bool hasTangents(const ofbx::Geometry& geom) {
 	if (geom.getTangents()) return true;
-	if (geom.getNormals() && geom.getUVs()) return true;
+	if (geom.getUVs()) return true;
 	return false;
 }
 
@@ -128,28 +122,49 @@ static void extractEmbedded(const ofbx::IScene& scene, const char* src_dir)
 		const ofbx::DataView embedded = scene.getEmbeddedData(i);
 
 		ofbx::DataView filename = scene.getEmbeddedFilename(i);
-		char path[MAX_PATH_LENGTH];
+		char path[LUMIX_MAX_PATH];
 		filename.toString(path);
 		const PathInfo pi(path);
-		const StaticString<MAX_PATH_LENGTH> fullpath(src_dir, pi.m_basename, ".", pi.m_extension);
+		const StaticString<LUMIX_MAX_PATH> fullpath(src_dir, pi.m_basename, ".", pi.m_extension);
 
-		if (OS::fileExists(fullpath)) return;
+		if (os::fileExists(fullpath)) return;
 
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (!file.open(fullpath)) {
-			logError("Renderer") << "Failed to save " << fullpath;
+			logError("Failed to save ", fullpath);
 			return;
 		}
 
 		if (!file.write(embedded.begin + 4, embedded.end - embedded.begin - 4)) {
-			logError("Renderer") << "Failed to write " << fullpath;
+			logError("Failed to write ", fullpath);
 		}
 		file.close();
 	}
 }
 
 
-void FBXImporter::gatherMaterials(const char* src_dir)
+bool FBXImporter::findTexture(const char* src_dir, const char* ext, FBXImporter::ImportTexture& tex) const {
+	PathInfo file_info(tex.path);
+	tex.src = src_dir;
+	tex.src << file_info.m_basename << "." << ext;
+	tex.is_valid = m_filesystem.fileExists(tex.src);
+
+	if (!tex.is_valid) {
+		tex.src = src_dir;
+		tex.src << file_info.m_dir << "/" << file_info.m_basename << "." << ext;
+		tex.is_valid = m_filesystem.fileExists(tex.src);
+					
+		if (!tex.is_valid) {
+			tex.src = src_dir;
+			tex.src << "textures/" << file_info.m_basename << "." << ext;
+			tex.is_valid = m_filesystem.fileExists(tex.src);
+		}
+	}
+	return tex.is_valid;
+}
+
+
+void FBXImporter::gatherMaterials(const char* fbx_filename, const char* src_dir)
 {
 	for (ImportMesh& mesh : m_meshes)
 	{
@@ -159,10 +174,9 @@ void FBXImporter::gatherMaterials(const char* src_dir)
 		ImportMaterial& mat = m_materials.emplace();
 		mat.fbx = fbx_mat;
 
-		auto gatherTexture = [&mat, src_dir](ofbx::Texture::TextureType type) {
+		auto gatherTexture = [this, &mat, src_dir, fbx_filename](ofbx::Texture::TextureType type) {
 			const ofbx::Texture* texture = mat.fbx->getTexture(type);
 			if (!texture) return;
-
 
 			ImportTexture& tex = mat.textures[type];
 			tex.fbx = texture;
@@ -170,32 +184,24 @@ void FBXImporter::gatherMaterials(const char* src_dir)
 			if (filename == "") filename = tex.fbx->getFileName();
 			filename.toString(tex.path.data);
 			tex.src = tex.path;
-			tex.is_valid = OS::fileExists(tex.src);
+			tex.is_valid = m_filesystem.fileExists(tex.src);
 
-			if (!tex.is_valid)
-			{
-				PathInfo file_info(tex.path);
-				tex.src = src_dir;
-				tex.src << file_info.m_basename << "." << file_info.m_extension;
-				tex.is_valid = OS::fileExists(tex.src);
-
-				if (!tex.is_valid)
-				{
-					tex.src = src_dir;
-					tex.src << tex.path;
-					tex.is_valid = OS::fileExists(tex.src);
-					
-					if (!tex.is_valid) {
-						tex.src = src_dir;
-						tex.src << "textures/" << file_info.m_basename << "." << file_info.m_extension;
-						tex.is_valid = OS::fileExists(tex.src);
-					}
+			PathInfo file_info(tex.path);
+			if (!tex.is_valid && !findTexture(src_dir, file_info.m_extension, tex)) {
+				const char* exts[] = { "dds", "png", "jpg", "jpeg", "tga", "bmp" };
+				for (const char* ext : exts) {
+					if (findTexture(src_dir, ext, tex)) break;
 				}
 			}
 
-			char tmp[MAX_PATH_LENGTH];
+			char tmp[LUMIX_MAX_PATH];
 			Path::normalize(tex.src, Span(tmp));
 			tex.src = tmp;
+
+			if (!tex.is_valid) {
+				logInfo(fbx_filename, ": texture ", tex.src, " not found");
+				tex.src = "";
+			}
 
 			tex.import = true;
 		};
@@ -236,15 +242,9 @@ void FBXImporter::sortBones(bool force_skinned)
 	}
 
 	if (force_skinned) {
-		for (const ofbx::Object*& bone : m_bones) {
-			const int idx = m_meshes.find([&](const ImportMesh& mesh){
-				return mesh.fbx == bone;
-			});
-
-			if (idx >= 0) {
-				m_meshes[idx].is_skinned = true;
-				m_meshes[idx].bone_idx = int(&bone - m_bones.begin());
-			}
+		for (ImportMesh& m : m_meshes) {
+			m.bone_idx = m_bones.indexOf(m.fbx);
+			m.is_skinned = true;
 		}
 	}
 }
@@ -263,6 +263,10 @@ void FBXImporter::gatherBones(const ofbx::IScene& scene, bool force_skinned)
 					const ofbx::Cluster* cluster = skin->getCluster(i);
 					insertHierarchy(m_bones, cluster->getLink());
 				}
+			}
+
+			if (force_skinned) {
+				insertHierarchy(m_bones, mesh.fbx);
 			}
 		}
 	}
@@ -289,8 +293,7 @@ void FBXImporter::gatherBones(const ofbx::IScene& scene, bool force_skinned)
 void FBXImporter::gatherAnimations(const ofbx::IScene& scene)
 {
 	int anim_count = scene.getAnimationStackCount();
-	for (int i = 0; i < anim_count; ++i)
-	{
+	for (int i = 0; i < anim_count; ++i) {
 		ImportAnimation& anim = m_animations.emplace();
 		anim.scene = &scene;
 		anim.fbx = (const ofbx::AnimationStack*)scene.getAnimationStack(i);
@@ -304,16 +307,20 @@ void FBXImporter::gatherAnimations(const ofbx::IScene& scene)
 			}
 			if (anim.name.empty() && take_info->filename.begin != take_info->filename.end)
 			{
-				char tmp[MAX_PATH_LENGTH];
+				char tmp[LUMIX_MAX_PATH];
 				take_info->filename.toString(tmp);
-				Path::getBasename(Span(anim.name.data), tmp);
+				copyString(Span(anim.name.data), Path::getBasename(tmp));
 			}
 			if (anim.name.empty()) anim.name << "anim";
 		}
 		else
 		{
-			anim.name = "anim";
+			anim.name = "";
 		}
+	}
+
+	if (m_animations.size() == 1) {
+		m_animations[0].name = "";
 	}
 }
 
@@ -340,7 +347,7 @@ static Matrix toLumix(const ofbx::Matrix& mtx)
 {
 	Matrix res;
 
-	for (int i = 0; i < 16; ++i) (&res.m11)[i] = (float)mtx.m[i];
+	for (int i = 0; i < 16; ++i) (&res.columns[0].x)[i] = (float)mtx.m[i];
 
 	return res;
 }
@@ -370,8 +377,7 @@ static u32 packF4u(const Vec3& vec)
 void FBXImporter::writePackedVec3(const ofbx::Vec3& vec, const Matrix& mtx, OutputMemoryStream* blob) const
 {
 	Vec3 v = toLumixVec3(vec);
-	v = (mtx * Vec4(v, 0)).xyz();
-	v.normalize();
+	v = normalize((mtx * Vec4(v, 0)).xyz());
 	v = fixOrientation(v);
 
 	u32 packed = packF4u(v);
@@ -416,7 +422,7 @@ static int getMaterialIndex(const ofbx::Mesh& mesh, const ofbx::Material& materi
 }
 
 
-static void centerMesh(const ofbx::Vec3* vertices, int vertices_count, FBXImporter::ImportConfig::Origin origin, Matrix* transform)
+static void centerMesh(const ofbx::Vec3* vertices, int vertices_count, bool bottom, Matrix& transform, Vec3& center)
 {
 	if (vertices_count <= 0) return;
 
@@ -436,14 +442,15 @@ static void centerMesh(const ofbx::Vec3* vertices, int vertices_count, FBXImport
 		max.z = maximum(max.z, v.z);
 	}
 
-	Vec3 center;
 	center.x = float(min.x + max.x) * 0.5f;
 	center.y = float(min.y + max.y) * 0.5f;
 	center.z = float(min.z + max.z) * 0.5f;
 		
-	if (origin == FBXImporter::ImportConfig::Origin::BOTTOM) center.y = (float)min.y;
+	if (bottom) center.y = (float)min.y;
 
-	transform->setTranslation(-center);
+	const Vec3 p = transform.getTranslation();
+	transform.setTranslation(-center);
+	center += p;
 }
 
 
@@ -487,6 +494,45 @@ static void computeTangentsSimple(Array<ofbx::Vec3>& out, i32 vertex_count, cons
 		out[i + 0] = tangent;
 		out[i + 1] = tangent;
 		out[i + 2] = tangent;
+	}
+}
+
+static void computeNormals(Array<ofbx::Vec3>& out, const ofbx::Vec3* vertices, i32 vertex_count, const u32* remap, IAllocator& allocator) {
+	out.resize(vertex_count);
+	Array<u32> count(allocator);
+	Array<Vec3> normals(allocator);
+	normals.resize(vertex_count);
+	count.resize(vertex_count);
+	memset(normals.begin(), 0, normals.byte_size());
+	memset(count.begin(), 0, count.byte_size());
+
+	auto toLumix = [](const ofbx::Vec3& a) { return Vec3{(float)a.x, (float)a.y, (float)a.z}; };
+	auto fromLumix = [](const Vec3& a) { return ofbx::Vec3{ a.x, a.y, a.z}; };
+	u32 m = 0;
+
+	for (int i = 0; i < vertex_count; i+= 3) {
+		const Vec3 v0 = toLumix(vertices[i + 0]);
+		const Vec3 v1 = toLumix(vertices[i + 1]);
+		const Vec3 v2 = toLumix(vertices[i + 2]);
+		const Vec3 n = normalize(cross(v1 - v0, v2 - v0));
+		++count[remap[i + 0]];
+		++count[remap[i + 1]];
+		++count[remap[i + 2]];
+		normals[remap[i + 0]] = normals[remap[i + 0]] + n;
+		normals[remap[i + 1]] = normals[remap[i + 1]] + n;
+		normals[remap[i + 2]] = normals[remap[i + 2]] + n;
+
+		m = maximum(m ,remap[i]);
+		m = maximum(m, remap[i + 1]);
+		m = maximum(m, remap[i + 2]);
+	}
+
+	for (u32 i = 0; i < m; ++i) {
+		if (count[i] > 0) normals[i] = normals[i] / (float)count[i];
+	}
+
+	for (i32 i = 0; i < vertex_count; ++i) {
+		out[i] = fromLumix(normals[remap[i]]);
 	}
 }
 
@@ -548,14 +594,14 @@ static void computeTangents(Array<ofbx::Vec3>& out, i32 vertex_count, const ofbx
 	ctx.m_pInterface = &iface;
 	tbool res = genTangSpaceDefault(&ctx);
 	if (!res) {
-		logError("Renderer") << path << ": failed to generate tangent space";
+		logError(path, ": failed to generate tangent space");
 	}
 }
 
 static bool doesFlipHandness(const Matrix& mtx) {
 	Vec3 x(1, 0, 0);
 	Vec3 y(0, 1, 0);
-	Vec3 z = mtx.inverted().transformVector(crossProduct(mtx.transformVector(x), mtx.transformVector(y)));
+	Vec3 z = mtx.inverted().transformVector(cross(mtx.transformVector(x), mtx.transformVector(y)));
 	return z.z < 0;
 }
 
@@ -572,7 +618,7 @@ const FBXImporter::ImportGeometry& FBXImporter::getImportGeometry(const ofbx::Ge
 
 void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 {
-	JobSystem::forEach(m_geometries.size(), 1, [&](i32 geom_idx, i32){
+	jobs::forEach(m_geometries.size(), 1, [&](i32 geom_idx, i32){
 		ImportGeometry& import_geom = m_geometries[geom_idx];
 		const ofbx::Geometry* geom = import_geom.fbx;
 		const int vertex_count = geom->getVertexCount();
@@ -601,9 +647,23 @@ void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 		}
 
 		import_geom.unique_vertex_count = (u32)meshopt_generateVertexRemapMulti(import_geom.indices.begin(), nullptr, vertex_count, vertex_count, streams, stream_count);
+
+		if (!normals) {
+			computeNormals(import_geom.computed_normals, vertices, vertex_count, import_geom.indices.begin(), m_allocator);
+			normals = import_geom.computed_normals.begin();
+
+			if (!tangents && uvs) {
+				if (cfg.mikktspace_tangents) {
+					computeTangents(import_geom.computed_tangents, vertex_count, vertices, normals, uvs, path);
+				}
+				else {
+					computeTangentsSimple(import_geom.computed_tangents, vertex_count, vertices, uvs);
+				}
+			}
+		}
 	});
 	
-	JobSystem::forEach(m_meshes.size(), 1, [&](i32 mesh_idx, i32){
+	jobs::forEach(m_meshes.size(), 1, [&](i32 mesh_idx, i32){
 		ImportMesh& import_mesh = m_meshes[mesh_idx];
 		import_mesh.vertex_data.clear();
 		import_mesh.indices.clear();
@@ -619,19 +679,21 @@ void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 		const ofbx::Vec4* colors = cfg.import_vertex_colors ? geom->getColors() : nullptr;
 		const ofbx::Vec2* uvs = geom->getUVs();
 
+		if (!normals) normals = import_geom.computed_normals.begin();
+
 		Matrix transform_matrix = Matrix::IDENTITY;
 		Matrix geometry_matrix = toLumix(mesh.getGeometricMatrix());
 		transform_matrix = toLumix(mesh.getGlobalTransform()) * geometry_matrix;
 		if (cancel_mesh_transforms) transform_matrix.setTranslation({0, 0, 0});
 		if (cfg.origin != ImportConfig::Origin::SOURCE) {
-			centerMesh(vertices, vertex_count, cfg.origin, &transform_matrix);
+			const bool bottom = cfg.origin == FBXImporter::ImportConfig::Origin::BOTTOM;
+			centerMesh(vertices, vertex_count, bottom, transform_matrix, import_mesh.origin);
 		}
-		import_mesh.transform_matrix = transform_matrix;
-		import_mesh.transform_matrix.inverse();
+		import_mesh.transform_matrix = transform_matrix.inverted();
 
 		const bool flip_handness = doesFlipHandness(transform_matrix);
 		if (flip_handness) {
-			logError("FBX") << "Mesh " << mesh.name << " in " << path << " flips handness. This is not supported and the mesh will not display correctly.";
+			logError("Mesh ", mesh.name, " in ", path, " flips handness. This is not supported and the mesh will not display correctly.");
 		}
 
 		const int vertex_size = getVertexSize(*geom, import_mesh.is_skinned, cfg.import_vertex_colors);
@@ -641,13 +703,12 @@ void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 		if (import_mesh.is_skinned) fillSkinInfo(skinning, import_mesh);
 
 		AABB aabb = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
-		float radius_squared = 0;
+		float origin_radius_squared = 0;
 
 		int material_idx = getMaterialIndex(mesh, *import_mesh.fbx_mat);
 		ASSERT(material_idx >= 0);
 
 		const int* geom_materials = geom->getMaterials();
-		Array<ofbx::Vec3> computed_tangents(m_allocator);
 		if (!tangents && import_geom.computed_tangents.size()) {
 			tangents = import_geom.computed_tangents.begin();
 		}
@@ -670,8 +731,8 @@ void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 			pos = fixOrientation(pos);
 			import_mesh.vertex_data.write(pos);
 
-			float sq_len = pos.squaredLength();
-			radius_squared = maximum(radius_squared, sq_len);
+			float sq_len = squaredLength(pos);
+			origin_radius_squared = maximum(origin_radius_squared, sq_len);
 
 			aabb.min.x = minimum(aabb.min.x, pos.x);
 			aabb.min.y = minimum(aabb.min.y, pos.y);
@@ -696,10 +757,20 @@ void FBXImporter::postprocessMeshes(const ImportConfig& cfg, const char* path)
 		}
 
 		import_mesh.aabb = aabb;
-		import_mesh.radius_squared = radius_squared;
+		import_mesh.origin_radius_squared = origin_radius_squared;
+		import_mesh.center_radius_squared = 0;
+		const Vec3 center = (aabb.max + aabb.min) * 0.5f;
+
+		const u8* mem = import_mesh.vertex_data.data();
+		for (u32 i = 0; i < written_idx; ++i) {
+			Vec3 p;
+			memcpy(&p, mem, sizeof(p));
+			import_mesh.center_radius_squared = maximum(import_mesh.center_radius_squared, squaredLength(p - center));
+			mem += vertex_size;
+		}
 
 		if (import_mesh.lod >= 3 && cfg.create_impostor) {
-			logWarning("FBX") << path << " has more than 3 LODs and some are replaced with impostor";
+			logWarning(path, " has more than 3 LODs and some are replaced with impostor");
 			import_mesh.import = false;
 		}
 	});
@@ -725,7 +796,7 @@ static int detectMeshLOD(const FBXImporter::ImportMesh& mesh)
 	lod_str += stringLength("_LOD");
 
 	int lod;
-	fromCString(Span(lod_str, stringLength(lod_str)), Ref(lod));
+	fromCString(Span(lod_str, stringLength(lod_str)), lod);
 
 	return lod;
 }
@@ -771,6 +842,7 @@ void FBXImporter::gatherMeshes(ofbx::IScene* scene)
 FBXImporter::~FBXImporter()
 {
 	if (scene) scene->destroy();
+	if (m_impostor_shadow_shader) m_impostor_shadow_shader->decRefCount();
 }
 
 
@@ -783,6 +855,7 @@ FBXImporter::FBXImporter(StudioApp& app)
 	, m_geometries(m_allocator)
 	, m_animations(m_allocator)
 	, m_bones(m_allocator)
+	, m_bind_pose(m_allocator)
 	, out_file(m_allocator)
 	, m_filesystem(app.getEngine().getFileSystem())
 	, m_app(app)
@@ -791,12 +864,15 @@ FBXImporter::FBXImporter(StudioApp& app)
 
 
 static void ofbx_job_processor(ofbx::JobFunction fn, void*, void* data, u32 size, u32 count) {
-	JobSystem::forEach(count, 1, [data, size, fn](i32 i, i32){
+	jobs::forEach(count, 1, [data, size, fn](i32 i, i32){
 		u8* ptr = (u8*)data;
 		fn(ptr + i * size);
 	});
 }
 
+void FBXImporter::init() {
+	m_impostor_shadow_shader = m_app.getEngine().getResourceManager().load<Shader>(Path("pipelines/impostor_shadow.shd"));
+}
 
 bool FBXImporter::setSource(const char* filename, bool ignore_geometry, bool force_skinned)
 {
@@ -810,17 +886,18 @@ bool FBXImporter::setSource(const char* filename, bool ignore_geometry, bool for
 		m_materials.clear();
 		m_animations.clear();
 		m_bones.clear();
+		m_bind_pose.clear();
 	}
 
 	OutputMemoryStream data(m_allocator);
-	if (!m_filesystem.getContentSync(Path(filename), Ref(data))) return false;
+	if (!m_filesystem.getContentSync(Path(filename), data)) return false;
 	
 	const u64 flags = ignore_geometry ? (u64)ofbx::LoadFlags::IGNORE_GEOMETRY : (u64)ofbx::LoadFlags::TRIANGULATE;
 	scene = ofbx::load(data.data(), (i32)data.size(), flags, &ofbx_job_processor, nullptr);
 	if (!scene)
 	{
-		logError("FBX") << "Failed to import \"" << filename << ": " << ofbx::getError() << "\n"
-			<< "Please try to convert the FBX file with Autodesk FBX Converter or some other software to the latest version.";
+		logError("Failed to import \"", filename, ": ", ofbx::getError(), "\n"
+			"Please try to convert the FBX file with Autodesk FBX Converter or some other software to the latest version.");
 		return false;
 	}
 	m_fbx_scale = scene->getGlobalSettings()->UnitScaleFactor * 0.01f;
@@ -832,45 +909,44 @@ bool FBXImporter::setSource(const char* filename, bool ignore_geometry, bool for
 		case ofbx::UpVector_AxisZ: m_orientation = Orientation::Z_UP; break;
 	}
 
-	char src_dir[MAX_PATH_LENGTH];
-	Path::getDir(Span(src_dir), filename);
+	char src_dir[LUMIX_MAX_PATH];
+	copyString(Span(src_dir), Path::getDir(filename));
 	if (!ignore_geometry) extractEmbedded(*scene, src_dir);
 	gatherGeometries(scene);
 	gatherMeshes(scene);
 
 	gatherAnimations(*scene);
 	if (!ignore_geometry) {
-		gatherMaterials(src_dir);
+		gatherMaterials(filename, src_dir);
 		m_materials.removeDuplicates([](const ImportMaterial& a, const ImportMaterial& b) { return a.fbx == b.fbx; });
-		gatherBones(*scene, force_skinned);
+		
+		bool any_skinned = false;
+		for (const ImportMesh& m : m_meshes) any_skinned = any_skinned || m.is_skinned;
+		gatherBones(*scene, force_skinned || any_skinned);
 	}
 
 	return true;
 }
 
-
 void FBXImporter::writeString(const char* str) { out_file.write(str, stringLength(str)); }
-
+	
 static Vec3 impostorToWorld(Vec2 uv) {
-	Vec3 position = Vec3(
-						0.0f + (uv.x - uv.y),
-						-1.0f + (uv.x + uv.y),
-						0.0f
-					);
+	uv = uv * 2 - 1;
+	Vec3 position= Vec3(
+		uv.x + uv.y,
+		0.f,
+		uv.x - uv.y
+	) * 0.5f;
 
-	Vec2 absolute;
-	absolute.x = fabsf(position.x);
-	absolute.y = fabsf(position.y);
-	position.z = 1.0f - absolute.x - absolute.y;
-
-	return Vec3{position.x, position.z, position.y};
+	position.y = -(1.f - fabsf(position.x) - fabsf(position.z));
+	return position;
 };
 
 static constexpr u32 IMPOSTOR_TILE_SIZE = 512;
 static constexpr u32 IMPOSTOR_COLS = 9;
 
-static void getBBProjection(const AABB& aabb, Ref<Vec2> out_min, Ref<Vec2> out_max) {
-	const float radius = (aabb.max - aabb.min).length() * 0.5f;
+static void getBBProjection(const AABB& aabb, Vec2& out_min, Vec2& out_max) {
+	const float radius = length(aabb.max - aabb.min) * 0.5f;
 	const Vec3 center = (aabb.min + aabb.max) * 0.5f;
 
 	Matrix proj;
@@ -902,9 +978,10 @@ static void getBBProjection(const AABB& aabb, Ref<Vec2> out_min, Ref<Vec2> out_m
 
 struct CaptureImpostorJob : Renderer::RenderJob {
 
-	CaptureImpostorJob(Ref<Array<u32>> gb0, Ref<Array<u32>> gb1, Ref<IVec2> size, IAllocator& allocator) 
+	CaptureImpostorJob(Array<u32>& gb0, Array<u32>& gb1, Array<u32>& shadow, IVec2& size, IAllocator& allocator) 
 		: m_gb0(gb0)
 		, m_gb1(gb1)
+		, m_shadow(shadow)
 		, m_tile_size(size)
 		, m_drawcalls(allocator)
 	{
@@ -912,7 +989,7 @@ struct CaptureImpostorJob : Renderer::RenderJob {
 
 	void setup() override {
 		m_aabb = m_model->getAABB();
-		m_radius = m_model->getBoundingRadius();
+		m_radius = m_model->getCenterBoundingRadius();
 		for (u32 i = 0; i <= (u32)m_model->getLODIndices()[0].to; ++i) {
 			const Mesh& mesh = m_model->getMesh(i);
 			Shader* shader = mesh.material->getShader();
@@ -928,83 +1005,121 @@ struct CaptureImpostorJob : Renderer::RenderJob {
 
 		gpu::BufferHandle pass_buf = gpu::allocBufferHandle();
 		gpu::BufferHandle ub = gpu::allocBufferHandle();
-		gpu::createBuffer(ub, (u32)gpu::BufferFlags::UNIFORM_BUFFER, 256, nullptr);
+		gpu::createBuffer(ub, gpu::BufferFlags::UNIFORM_BUFFER, 512, nullptr);
 		const u32 pass_buf_size = (sizeof(PassState) + 255) & ~255;
-		gpu::createBuffer(pass_buf, (u32)gpu::BufferFlags::UNIFORM_BUFFER, pass_buf_size, nullptr);
-		gpu::bindUniformBuffer(1, pass_buf, 0, pass_buf_size);
-		gpu::bindUniformBuffer(4, ub, 0, 256);
+		gpu::createBuffer(pass_buf, gpu::BufferFlags::UNIFORM_BUFFER, pass_buf_size, nullptr);
+		gpu::bindUniformBuffer(UniformBuffer::PASS, pass_buf, 0, pass_buf_size);
+		gpu::bindUniformBuffer(UniformBuffer::DRAWCALL, ub, 0, 512);
 
-		const Vec3 center = (m_aabb.min + m_aabb.max) * 0.5f;
+		const Vec3 center = Vec3(0, (m_aabb.min + m_aabb.max).y * 0.5f, 0);
 		Vec2 min, max;
-		getBBProjection(m_aabb, Ref(min), Ref(max));
+		getBBProjection(m_aabb, min, max);
 		const Vec2 size = max - min;
 
 		m_tile_size = IVec2(int(IMPOSTOR_TILE_SIZE * size.x / size.y), IMPOSTOR_TILE_SIZE);
-		m_tile_size->x = (m_tile_size->x + 3) & ~3;
-		m_tile_size->y = (m_tile_size->y + 3) & ~3;
-		const IVec2 texture_size = m_tile_size.value * IMPOSTOR_COLS;
-		gpu::createTexture(gbs[0], texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, (u32)gpu::TextureFlags::NO_MIPS, nullptr, "impostor_gb0");
-		gpu::createTexture(gbs[1], texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, (u32)gpu::TextureFlags::NO_MIPS, nullptr, "impostor_gb1");
-		gpu::createTexture(gbs[2], texture_size.x, texture_size.y, 1, gpu::TextureFormat::D24S8, (u32)gpu::TextureFlags::NO_MIPS, nullptr, "impostor_gbd");
+		m_tile_size.x = (m_tile_size.x + 3) & ~3;
+		m_tile_size.y = (m_tile_size.y + 3) & ~3;
+		const IVec2 texture_size = m_tile_size * IMPOSTOR_COLS;
+		gpu::createTexture(gbs[0], texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, gpu::TextureFlags::NO_MIPS, nullptr, "impostor_gb0");
+		gpu::createTexture(gbs[1], texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, gpu::TextureFlags::NO_MIPS, nullptr, "impostor_gb1");
+		gpu::createTexture(gbs[2], texture_size.x, texture_size.y, 1, gpu::TextureFormat::D32, gpu::TextureFlags::NO_MIPS | gpu::TextureFlags::POINT_FILTER, nullptr, "impostor_gbd");
 		
-		gpu::setFramebuffer(gbs, 3, 0);
+		gpu::setFramebuffer(gbs, 2, gbs[2], gpu::FramebufferFlags::NONE);
 		const float color[] = {0, 0, 0, 0};
-		gpu::clear((u32)gpu::ClearFlags::COLOR | (u32)gpu::ClearFlags::DEPTH | (u32)gpu::ClearFlags::STENCIL, color, 0);
+		gpu::clear(gpu::ClearFlags::COLOR | gpu::ClearFlags::DEPTH | gpu::ClearFlags::STENCIL, color, 0);
 
 		for (u32 j = 0; j < IMPOSTOR_COLS; ++j) {
 			for (u32 i = 0; i < IMPOSTOR_COLS; ++i) {
-				gpu::viewport(i * m_tile_size->x, j * m_tile_size->y, m_tile_size->x, m_tile_size->y);
+				gpu::viewport(i * m_tile_size.x, j * m_tile_size.y, m_tile_size.x, m_tile_size.y);
+				const Vec3 v = impostorToWorld({i / (float)(IMPOSTOR_COLS - 1), j / (float)(IMPOSTOR_COLS - 1)});
+
+				Matrix model_mtx;
+				Vec3 up = Vec3(0, 1, 0);
+				if (i == IMPOSTOR_COLS >> 1 && j == IMPOSTOR_COLS >> 1) up = Vec3(1, 0, 0);
+				model_mtx.lookAt(center - v * 2 * m_radius, center, up);
+				gpu::update(ub, &model_mtx.columns[0].x, sizeof(model_mtx));
+
 				for (const Drawcall& dc : m_drawcalls) {
 					const Mesh::RenderData* rd = dc.mesh;
 					gpu::bindTextures(dc.material->textures, 0, dc.material->textures_count);
 
-					const Vec3 v = impostorToWorld({i / (float)(IMPOSTOR_COLS - 1), j / (float)(IMPOSTOR_COLS - 1)});
-
-					Matrix model_mtx;
-					if (i == IMPOSTOR_COLS >> 1 && j == IMPOSTOR_COLS >> 1) {
-						model_mtx.lookAt(Vec3(0, 0, 0), v, Vec3(0, 0, 1));
-					}
-					else {
-						model_mtx.lookAt(Vec3(0, 0, 0), v, Vec3(0, 1, 0));
-					}
-					gpu::update(ub, &model_mtx.m11, sizeof(model_mtx));
 					PassState pass_state;
-					pass_state.view.lookAt(center + Vec3(0, 0, 2 * m_radius), center, {0, 1, 0});
+					pass_state.view = Matrix::IDENTITY;
 					pass_state.projection.setOrtho(min.x, max.x, min.y, max.y, 0, 5 * m_radius, true);
 					pass_state.inv_projection = pass_state.projection.inverted();
 					pass_state.inv_view = pass_state.view.fastInverted();
 					pass_state.view_projection = pass_state.projection * pass_state.view;
 					pass_state.inv_view_projection = pass_state.view_projection.inverted();
 					pass_state.view_dir = Vec4(pass_state.view.inverted().transformVector(Vec3(0, 0, -1)), 0);
+					pass_state.camera_up = Vec4(pass_state.view.inverted().transformVector(Vec3(0, 1, 0)), 0);
 					gpu::update(pass_buf, &pass_state, sizeof(pass_state));
 
-
 					gpu::useProgram(dc.program);
-					gpu::bindUniformBuffer(2, m_material_ub, dc.material->material_constants * sizeof(MaterialConsts), sizeof(MaterialConsts));
+					gpu::bindUniformBuffer(UniformBuffer::MATERIAL, m_material_ub, dc.material->material_constants * sizeof(MaterialConsts), sizeof(MaterialConsts));
 					gpu::bindIndexBuffer(rd->index_buffer_handle);
 					gpu::bindVertexBuffer(0, rd->vertex_buffer_handle, 0, rd->vb_stride);
 					gpu::bindVertexBuffer(1, gpu::INVALID_BUFFER, 0, 0);
-					gpu::setState(u64(gpu::StateFlags::DEPTH_TEST) | u64(gpu::StateFlags::DEPTH_WRITE) | dc.material->render_states);
-					gpu::drawTriangles(rd->indices_count, rd->index_type);
+					gpu::setState(gpu::StateFlags::DEPTH_TEST | gpu::StateFlags::DEPTH_WRITE | dc.material->render_states);
+					gpu::drawTriangles(0, rd->indices_count, rd->index_type);
 				}
 			}
 		}
 
-		gpu::setFramebuffer(nullptr, 0, 0);
+		gpu::setFramebuffer(nullptr, 0, gpu::INVALID_TEXTURE, gpu::FramebufferFlags::NONE);
 
-		m_gb0->resize(texture_size.x * texture_size.y);
-		m_gb1->resize(m_gb0->size());
+		m_gb0.resize(texture_size.x * texture_size.y);
+		m_gb1.resize(m_gb0.size());
+		m_shadow.resize(m_gb0.size());
+
+		gpu::TextureHandle shadow = gpu::allocTextureHandle();
+		gpu::createTexture(shadow, texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, gpu::TextureFlags::NO_MIPS | gpu::TextureFlags::COMPUTE_WRITE, nullptr, "impostor_shadow");
+		gpu::useProgram(m_shadow_program);
+		gpu::bindImageTexture(shadow, 0);
+		gpu::bindTextures(&gbs[2], 1, 1);
+		struct {
+			Matrix projection;
+			Matrix proj_to_model;
+			Vec4 center;
+			IVec2 tile;
+			IVec2 tile_size;
+			int size;
+			float radius;
+		} data;
+		for (u32 j = 0; j < IMPOSTOR_COLS; ++j) {
+			for (u32 i = 0; i < IMPOSTOR_COLS; ++i) {
+				Matrix view, projection;
+				const Vec3 v = impostorToWorld({i / (float)(IMPOSTOR_COLS - 1), j / (float)(IMPOSTOR_COLS - 1)});
+				Vec3 up = Vec3(0, 1, 0);
+				if (i == IMPOSTOR_COLS >> 1 && j == IMPOSTOR_COLS >> 1) up = Vec3(1, 0, 0);
+				view.lookAt(center - v * 2 * m_radius, center, up);
+				projection.setOrtho(min.x, max.x, min.y, max.y, 0, 5 * m_radius, true);
+				data.proj_to_model = (projection * view).inverted();
+				data.projection = projection;
+				data.center = Vec4(center, 1);
+				data.tile = IVec2(i, j);
+				data.tile_size = m_tile_size;
+				data.size = IMPOSTOR_COLS;
+				data.radius = m_radius;
+				gpu::update(ub, &data, sizeof(data));
+				gpu::dispatch((m_tile_size.x + 15) / 16, (m_tile_size.y + 15) / 16, 1);
+			}
+		}
 
 		gpu::TextureHandle staging = gpu::allocTextureHandle();
-		const u32 flags = u32(gpu::TextureFlags::NO_MIPS) | u32(gpu::TextureFlags::READBACK);
+		const gpu::TextureFlags flags = gpu::TextureFlags::NO_MIPS | gpu::TextureFlags::READBACK;
 		gpu::createTexture(staging, texture_size.x, texture_size.y, 1, gpu::TextureFormat::RGBA8, flags, nullptr, "staging_buffer");
 		gpu::copy(staging, gbs[0], 0, 0);
-		gpu::readTexture(staging, 0, Span((u8*)m_gb0->begin(), m_gb0->byte_size()));
+		gpu::readTexture(staging, 0, Span((u8*)m_gb0.begin(), m_gb0.byte_size()));
+		
 		gpu::copy(staging, gbs[1], 0, 0);
-		gpu::readTexture(staging, 0, Span((u8*)m_gb1->begin(), m_gb1->byte_size()));
+		gpu::readTexture(staging, 0, Span((u8*)m_gb1.begin(), m_gb1.byte_size()));
+		
+		gpu::copy(staging, shadow, 0, 0);
+		gpu::readTexture(staging, 0, Span((u8*)m_shadow.begin(), m_shadow.byte_size()));
 		gpu::destroy(staging);
 
 		gpu::destroy(ub);
+		gpu::destroy(shadow);
 		gpu::destroy(gbs[0]);
 		gpu::destroy(gbs[1]);
 		gpu::destroy(gbs[2]);
@@ -1017,32 +1132,59 @@ struct CaptureImpostorJob : Renderer::RenderJob {
 	};
 
 	Array<Drawcall> m_drawcalls;
+	gpu::ProgramHandle m_shadow_program;
 	AABB m_aabb;
 	float m_radius;
 	gpu::BufferHandle m_material_ub;
-	Ref<Array<u32>> m_gb0;
-	Ref<Array<u32>> m_gb1;
+	Array<u32>& m_gb0;
+	Array<u32>& m_gb1;
+	Array<u32>& m_shadow;
 	Model* m_model;
 	u32 m_capture_define;
-	Ref<IVec2> m_tile_size;
+	IVec2& m_tile_size;
 };
 
-bool FBXImporter::createImpostorTextures(Model* model, Ref<Array<u32>> gb0_rgba, Ref<Array<u32>> gb1_rgba, Ref<IVec2> size)
+bool FBXImporter::createImpostorTextures(Model* model, Array<u32>& gb0_rgba, Array<u32>& gb1_rgba, Array<u32>& shadow, IVec2& size)
 {
 	ASSERT(model->isReady());
+	ASSERT(m_impostor_shadow_shader->isReady());
 
 	Engine& engine = m_app.getEngine();
 	Renderer* renderer = (Renderer*)engine.getPluginManager().getPlugin("renderer");
 	ASSERT(renderer);
 
 	IAllocator& allocator = renderer->getAllocator();
-	CaptureImpostorJob* job = LUMIX_NEW(allocator, CaptureImpostorJob)(gb0_rgba, gb1_rgba, size, allocator);
-	job->m_model = model;
-	job->m_capture_define = 1 << renderer->getShaderDefineIdx("DEFERRED");
-	job->m_material_ub = renderer->getMaterialUniformBuffer();
+	CaptureImpostorJob& job = renderer->createJob<CaptureImpostorJob>(gb0_rgba, gb1_rgba, shadow, size, allocator);
+	job.m_shadow_program = m_impostor_shadow_shader->getProgram(gpu::VertexDecl(), 0);
+	job.m_model = model;
+	job.m_capture_define = 1 << renderer->getShaderDefineIdx("DEFERRED");
+	job.m_material_ub = renderer->getMaterialUniformBuffer();
 	renderer->queue(job, 0);
 	renderer->frame();
 	renderer->waitForRender();
+
+	const PathInfo src_info(model->getPath().c_str());
+	const StaticString<LUMIX_MAX_PATH> mat_src(src_info.m_dir, src_info.m_basename, "_impostor.mat");
+	os::OutputFile f;
+	if (!m_filesystem.open(mat_src, f)) {
+		logError("Failed to create ", mat_src);
+	}
+	else {
+		const AABB& aabb = model->getAABB();
+		const Vec3 center = (aabb.max + aabb.min) * 0.5f;
+		f << "shader \"/pipelines/impostor.shd\"\n";
+		f << "texture \"" << src_info.m_basename << "_impostor0.tga\"\n";
+		f << "texture \"" << src_info.m_basename << "_impostor1.tga\"\n";
+		f << "texture \"\"\n";
+		f << "texture \"\"\n";
+		f << "texture \"" << src_info.m_basename << "_impostor2.tga\"\n";
+		f << "defines { \"ALPHA_CUTOUT\" }\n";
+		f << "layer \"impostor\"\n";
+		f << "backface_culling(false)\n";
+		f << "uniform(\"Center\", { 0, " << center.y << ", 0 })\n";
+		f.close();
+	}
+
 	
 	return true;
 }
@@ -1058,13 +1200,13 @@ void FBXImporter::writeMaterials(const char* src, const ImportConfig& cfg)
 		char mat_name[128];
 		getMaterialName(material.fbx, mat_name);
 
-		const StaticString<MAX_PATH_LENGTH + 128> mat_src(src_info.m_dir, mat_name, ".mat");
+		const StaticString<LUMIX_MAX_PATH + 128> mat_src(src_info.m_dir, mat_name, ".mat");
 		if (m_filesystem.fileExists(mat_src)) continue;
 
-		OS::OutputFile f;
-		if (!m_filesystem.open(mat_src, Ref(f)))
+		os::OutputFile f;
+		if (!m_filesystem.open(mat_src, f))
 		{
-			logError("FBX") << "Failed to create " << mat_src;
+			logError("Failed to create ", mat_src);
 			continue;
 		}
 		out_file.clear();
@@ -1075,17 +1217,17 @@ void FBXImporter::writeMaterials(const char* src, const ImportConfig& cfg)
 
 		auto writeTexture = [this](const ImportTexture& texture, u32 idx) {
 			if (texture.is_valid && idx < 2) {
-				const StaticString<MAX_PATH_LENGTH> meta_path(texture.src, ".meta");
-				if (!OS::fileExists(meta_path)) {
-					OS::OutputFile file;
-					if (file.open(meta_path)) {
+				const StaticString<LUMIX_MAX_PATH> meta_path(texture.src, ".meta");
+				if (!m_filesystem.fileExists(meta_path)) {
+					os::OutputFile file;
+					if (m_filesystem.open(meta_path, file)) {
 						
 						file << (idx == 0 ? "srgb = true\n" : "normalmap = true\n");
 						file.close();
 					}
 				}
 			}
-			if (texture.fbx)
+			if (texture.fbx && texture.src.data[0])
 			{
 				writeString("texture \"/");
 				writeString(texture.src);
@@ -1101,30 +1243,33 @@ void FBXImporter::writeMaterials(const char* src, const ImportConfig& cfg)
 		writeTexture(material.textures[1], 1);
 		writeTexture(material.textures[2], 2);
 		
-/*			ofbx::Color diffuse_color = material.fbx->getDiffuseColor();
-		out_file << "color {" << diffuse_color.r 
-			<< "," << diffuse_color.g
-			<< "," << diffuse_color.b
-			<< ",1}\n";*/
+		if (!material.textures[0].fbx) {
+			ofbx::Color diffuse_color = material.fbx->getDiffuseColor();
+			out_file << "color {" << diffuse_color.r 
+				<< "," << diffuse_color.g
+				<< "," << diffuse_color.b
+				<< ",1}\n";
+		}
 
 		if (!f.write(out_file.data(), out_file.size())) {
-			logError("FBX") << "Failed to write " << mat_src;
+			logError("Failed to write ", mat_src);
 		}
 		f.close();
 	}
 
 	if (cfg.create_impostor) {
-		const StaticString<MAX_PATH_LENGTH> mat_src(src_info.m_dir, src_info.m_basename, "_impostor.mat");
+		const StaticString<LUMIX_MAX_PATH> mat_src(src_info.m_dir, src_info.m_basename, "_impostor.mat");
 		if (!m_filesystem.fileExists(mat_src)) {
-			OS::OutputFile f;
-			if (!m_filesystem.open(mat_src, Ref(f))) {
-				logError("FBX") << "Failed to create " << mat_src;
+			os::OutputFile f;
+			if (!m_filesystem.open(mat_src, f)) {
+				logError("Failed to create ", mat_src);
 			}
 			else {
 				f << "shader \"/pipelines/impostor.shd\"\n";
 				f << "texture \"" << src_info.m_basename << "_impostor0.tga\"\n";
 				f << "texture \"" << src_info.m_basename << "_impostor1.tga\"\n";
 				f << "defines { \"ALPHA_CUTOUT\" }\n";
+				f << "layer \"impostor\"\n";
 				f << "backface_culling(false)\n";
 				f.close();
 			}
@@ -1132,7 +1277,7 @@ void FBXImporter::writeMaterials(const char* src, const ImportConfig& cfg)
 	}
 }
 
-static void convert(const ofbx::Matrix& mtx, Ref<Vec3> pos, Ref<Quat> rot)
+static void convert(const ofbx::Matrix& mtx, Vec3& pos, Quat& rot)
 {
 	Matrix m = toLumix(mtx);
 	m.normalizeScale();
@@ -1141,23 +1286,23 @@ static void convert(const ofbx::Matrix& mtx, Ref<Vec3> pos, Ref<Quat> rot)
 }
 
 template <typename T>
-static void fillTimes(const ofbx::AnimationCurve* curve, Ref<Array<T>> out){
+static void fillTimes(const ofbx::AnimationCurve* curve, Array<T>& out){
 	if(!curve) return;
 
 	const i64* times = curve->getKeyTime();
 	for (u32 i = 0, c = curve->getKeyCount(); i < c; ++i) {
-		if (out->empty()) {
-			out->emplace().time = times[i];
+		if (out.empty()) {
+			out.emplace().time = times[i];
 		}
-		else if (times[i] > out->back().time) {
-			out->emplace().time = times[i];
+		else if (times[i] > out.back().time) {
+			out.emplace().time = times[i];
 		}
 		else {
-			for (const T& k : out.value) {
+			for (const T& k : out) {
 				if (k.time == times[i]) break;
 				if (times[i] < k.time) {
-					const u32 idx = u32(&k - out->begin());
-					out->emplaceAt(idx).time = times[i];
+					const u32 idx = u32(&k - out.begin());
+					out.emplaceAt(idx).time = times[i];
 					break;
 				}
 			}
@@ -1189,9 +1334,8 @@ static float evalCurve(i64 time, const ofbx::AnimationCurve& curve) {
 
 // parent_scale - animated scale is not supported, but we can get rid of static scale if we ignore
 // it in writeSkeleton() and use `parent_scale` in this function
-static void compressPositions(float error, float parent_scale, Ref<Array<FBXImporter::Key>> keys)
+static void compressPositions(float error, float parent_scale, Array<FBXImporter::Key>& out)
 {
-	Array<FBXImporter::Key>& out = keys.value;
 	if (out.empty()) return;
 
 	Vec3 dir = out[1].pos - out[0].pos;
@@ -1209,12 +1353,13 @@ static void compressPositions(float error, float parent_scale, Ref<Array<FBXImpo
 			out[i - 1].flags |= 1;
 		}
 	}
+	for (u32 i = 0; i < (u32)out.size(); ++i) {
+		out[i].pos *= parent_scale;
+	}
 }
 
-static void compressRotations(float error,
-	Ref<Array<FBXImporter::Key>> keys)
+static void compressRotations(float error, Array<FBXImporter::Key>& out)
 {
-	Array<FBXImporter::Key>& out = keys.value;
 	if (out.empty()) return;
 
 	u32 prev = 0;
@@ -1236,16 +1381,16 @@ static float getScaleX(const ofbx::Matrix& mtx)
 {
 	Vec3 v(float(mtx.m[0]), float(mtx.m[4]), float(mtx.m[8]));
 
-	return v.length();
+	return length(v);
 }
 
-static void fill(const ofbx::Object& bone, double anim_len, const ofbx::AnimationLayer& layer, Ref<Array<FBXImporter::Key>> keys) {
+static void fill(const ofbx::Object& bone, double anim_len, const ofbx::AnimationLayer& layer, Array<FBXImporter::Key>& keys) {
 	const ofbx::AnimationCurveNode* translation_node = layer.getCurveNode(bone, "Lcl Translation");
 	const ofbx::AnimationCurveNode* rotation_node = layer.getCurveNode(bone, "Lcl Rotation");
 	if (!translation_node && !rotation_node) return;
 
-	keys->emplace().time = 0;
-	keys->emplace().time = ofbx::secondsToFbxTime(anim_len);
+	keys.emplace().time = 0;
+	keys.emplace().time = ofbx::secondsToFbxTime(anim_len);
 	if (translation_node) {
 		fillTimes(translation_node->getCurve(0), keys);
 		fillTimes(translation_node->getCurve(1), keys);
@@ -1261,13 +1406,13 @@ static void fill(const ofbx::Object& bone, double anim_len, const ofbx::Animatio
 	auto fill_rot = [&](u32 idx, const ofbx::AnimationCurve* curve) {
 		if (!curve) {
 			const ofbx::Vec3 lcl_rot = bone.getLocalRotation();
-			for (FBXImporter::Key& k : keys.value) {
+			for (FBXImporter::Key& k : keys) {
 				(&k.rot.x)[idx] = float((&lcl_rot.x)[idx]);
 			}
 			return;
 		}
 
-		for (FBXImporter::Key& k : keys.value) {
+		for (FBXImporter::Key& k : keys) {
 			(&k.rot.x)[idx] = evalCurve(k.time, *curve);
 		}
 	};
@@ -1275,13 +1420,13 @@ static void fill(const ofbx::Object& bone, double anim_len, const ofbx::Animatio
 	auto fill_pos = [&](u32 idx, const ofbx::AnimationCurve* curve) {
 		if (!curve) {
 			const ofbx::Vec3 lcl_pos = bone.getLocalTranslation();
-			for (FBXImporter::Key& k : keys.value) {
+			for (FBXImporter::Key& k : keys) {
 				(&k.pos.x)[idx] = float((&lcl_pos.x)[idx]);
 			}
 			return;
 		}
 
-		for (FBXImporter::Key& k : keys.value) {
+		for (FBXImporter::Key& k : keys) {
 			(&k.pos.x)[idx] = evalCurve(k.time, *curve);
 		}
 	};
@@ -1294,9 +1439,9 @@ static void fill(const ofbx::Object& bone, double anim_len, const ofbx::Animatio
 	fill_pos(1, translation_node ? translation_node->getCurve(1) : nullptr);
 	fill_pos(2, translation_node ? translation_node->getCurve(2) : nullptr);
 
-	for (FBXImporter::Key& key : keys.value) {
+	for (FBXImporter::Key& key : keys) {
 		const ofbx::Matrix mtx = bone.evalLocal({key.pos.x, key.pos.y, key.pos.z}, {key.rot.x, key.rot.y, key.rot.z});
-		convert(mtx, Ref(key.pos), Ref(key.rot));
+		convert(mtx, key.pos, key.rot);
 	}
 
 }
@@ -1338,16 +1483,27 @@ static LocalRigidTransform sample(const ofbx::Object& bone, const ofbx::Animatio
 	}
 	
 	const ofbx::Matrix mtx = bone.evalLocal({res.pos.x, res.pos.y, res.pos.z}, {euler_angles.x, euler_angles.y, euler_angles.z});
-	convert(mtx, Ref(res.pos), Ref(res.rot));
+	convert(mtx, res.pos, res.rot);
 	return res;
 }
 
-static bool isBindPosePositionTrack(u32 count, const Array<FBXImporter::Key>& keys, const ofbx::Object& bone, float error) {
+static bool isBindPoseRotationTrack(u32 count, const Array<FBXImporter::Key>& keys, const Quat& bind_rot, float error) {
 	if (count != 2) return false;
-	const Vec3 p = toLumixVec3(bone.getLocalTranslation());
 	for (const FBXImporter::Key& key : keys) {
 		if (key.flags & 1) continue;
-		const Vec3 d = key.pos - p;
+		if (fabs(key.rot.x - bind_rot.x) > error) return false;
+		if (fabs(key.rot.y - bind_rot.y) > error) return false;
+		if (fabs(key.rot.z - bind_rot.z) > error) return false;
+		if (fabs(key.rot.w - bind_rot.w) > error) return false;
+	}
+	return true;
+}
+
+static bool isBindPosePositionTrack(u32 count, const Array<FBXImporter::Key>& keys, const Vec3& bind_pos, float error) {
+	if (count != 2) return false;
+	for (const FBXImporter::Key& key : keys) {
+		if (key.flags & 1) continue;
+		const Vec3 d = key.pos - bind_pos;
 		if (d.x > error || d.y > error || d.z > error) return false;
 	}
 	return true;
@@ -1356,7 +1512,7 @@ static bool isBindPosePositionTrack(u32 count, const Array<FBXImporter::Key>& ke
 void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 {
 	PROFILE_FUNCTION();
-	for (const FBXImporter::ImportAnimation& anim : getAnimations()) { 
+	for (const FBXImporter::ImportAnimation& anim : m_animations) { 
 		ASSERT(anim.import);
 
 		const ofbx::AnimationStack* stack = anim.fbx;
@@ -1376,7 +1532,7 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 			anim_len = scene->getGlobalSettings()->TimeSpanStop;
 		}
 		else {
-			logError("Renderer") << "Unsupported animation in " << src;
+			logError("Unsupported animation in ", src);
 			continue;
 		}
 
@@ -1389,8 +1545,6 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 		header.frame_count = u32(anim_len * fps + 0.5f);
 		write(header);
 
-		write(anim.root_motion_bone_idx);
-
 		Array<Array<Key>> all_keys(m_allocator);
 		auto fbx_to_anim_time = [anim_len](i64 fbx_time){
 			const double t = clamp(ofbx::fbxTimeToSeconds(fbx_time) / anim_len, 0.0, 1.0);
@@ -1400,15 +1554,16 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 		all_keys.reserve(m_bones.size());
 		for (const ofbx::Object* bone : m_bones) {
 			Array<Key>& keys = all_keys.emplace(m_allocator);
-			fill(*bone, anim_len, *layer, Ref(keys));
+			fill(*bone, anim_len, *layer, keys);
 		}
 
 		for (const ofbx::Object*& bone : m_bones) {
 			Array<Key>& keys = all_keys[u32(&bone - m_bones.begin())];
-			const float parent_scale = bone->getParent() ? (float)getScaleX(bone->getParent()->getGlobalTransform()) : 1;
+			ofbx::Object* parent = bone->getParent();
+			const float parent_scale = parent ? (float)getScaleX(parent->getGlobalTransform()) : 1;
 			// TODO skip curves which do not change anything
-			compressRotations(cfg.rotation_error, Ref(keys));
-			compressPositions(cfg.position_error, parent_scale, Ref(keys));
+			compressRotations(cfg.rotation_error, keys);
+			compressPositions(cfg.position_error, parent_scale, keys);
 		}
 
 		const u64 stream_translations_count_pos = out_file.size();
@@ -1421,7 +1576,26 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 				if ((key.flags & 1) == 0) ++count;
 			}
 			if (count == 0) continue;
-			if (isBindPosePositionTrack(count, keys, *bone, cfg.position_error)) continue;
+			const u32 idx = u32(&bone - m_bones.begin());
+
+			ofbx::Object* parent = bone->getParent();
+			Vec3 bind_pos;
+			if (!parent)
+			{
+				bind_pos = m_bind_pose[idx].getTranslation();
+			}
+			else
+			{
+				const int parent_idx = m_bones.indexOf(parent);
+				if (m_bind_pose.empty()) {
+					bind_pos = toLumixVec3(bone->getLocalTranslation());
+				}
+				else {
+					bind_pos = (m_bind_pose[parent_idx].inverted() * m_bind_pose[idx]).getTranslation();
+				}
+			}
+
+			if (isBindPosePositionTrack(count, keys, bind_pos, cfg.position_error)) continue;
 			
 			const u32 name_hash = crc32(bone->name);
 			write(name_hash);
@@ -1454,6 +1628,26 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 				if ((key.flags & 2) == 0) ++count;
 			}
 			if (count == 0) continue;
+			
+			Quat bind_rot;
+			const u32 bone_idx = u32(&bone - m_bones.begin());
+			ofbx::Object* parent = bone->getParent();
+			if (!parent)
+			{
+				bind_rot = m_bind_pose[bone_idx].getRotation();
+			}
+			else
+			{
+				const i32 parent_idx = m_bones.indexOf(parent);
+				if (m_bind_pose.empty()) {
+					const Matrix mtx = toLumix(bone->evalLocal(bone->getLocalTranslation(), bone->getLocalRotation()));
+					bind_rot = mtx.getRotation();
+				}
+				else {
+					bind_rot = (m_bind_pose[parent_idx].inverted() * m_bind_pose[bone_idx]).getRotation();
+				}
+			}
+			//if (isBindPoseRotationTrack(count, keys, bind_rot, cfg.rotation_error)) continue;
 
 			const u32 name_hash = crc32(bone->name);
 			write(name_hash);
@@ -1483,9 +1677,10 @@ void FBXImporter::writeAnimations(const char* src, const ImportConfig& cfg)
 			}
 			++rotation_curves_count;
 		}
+
 		memcpy(out_file.getMutableData() + stream_rotations_count_pos, &rotation_curves_count, sizeof(rotation_curves_count));
 
-		const StaticString<MAX_PATH_LENGTH> anim_path(anim.name, ".ani:", src);
+		const StaticString<LUMIX_MAX_PATH> anim_path(anim.name, ".ani:", src);
 		m_compiler.writeCompiledResource(anim_path, Span(out_file.data(), (i32)out_file.size()));
 	}
 }
@@ -1498,9 +1693,8 @@ int FBXImporter::getVertexSize(const ofbx::Geometry& geom, bool is_skinned, bool
 	static const int UV_SIZE = sizeof(float) * 2;
 	static const int COLOR_SIZE = sizeof(u8) * 4;
 	static const int BONE_INDICES_WEIGHTS_SIZE = sizeof(float) * 4 + sizeof(u16) * 4;
-	int size = POSITION_SIZE;
+	int size = POSITION_SIZE + NORMAL_SIZE;
 
-	if (geom.getNormals()) size += NORMAL_SIZE;
 	if (geom.getUVs()) size += UV_SIZE;
 	if (geom.getColors() && import_vertex_colors) size += COLOR_SIZE;
 	if (hasTangents(geom)) size += TANGENT_SIZE;
@@ -1616,10 +1810,10 @@ void FBXImporter::writeImpostorVertices(const AABB& aabb)
 		};
 	#pragma pack()
 
-	const Vec3 center = (aabb.max + aabb.min) * 0.5f;
+	const Vec3 center = Vec3(0, (aabb.max + aabb.min).y * 0.5f, 0);
 
 	Vec2 min, max;
-	getBBProjection(aabb, Ref(min), Ref(max));
+	getBBProjection(aabb, min, max);
 
 	const Vertex vertices[] = {
 		{{center.x + min.x, center.y + min.y, center.z},	{128, 255, 128, 0},	 {255, 128, 128, 0}, {0, 0}},
@@ -1641,7 +1835,8 @@ void FBXImporter::writeImpostorVertices(const AABB& aabb)
 
 void FBXImporter::writeGeometry(int mesh_idx, const ImportConfig& cfg)
 {
-	float radius_squared = 0;
+	float origin_radius_squared = 0;
+	float center_radius_squared = 0;
 	OutputMemoryStream vertices_blob(m_allocator);
 	const ImportMesh& import_mesh = m_meshes[mesh_idx];
 	
@@ -1665,12 +1860,14 @@ void FBXImporter::writeGeometry(int mesh_idx, const ImportConfig& cfg)
 		write(import_mesh.indices.size());
 		write(&import_mesh.indices[0], sizeof(import_mesh.indices[0]) * import_mesh.indices.size());
 	}
-	radius_squared = maximum(radius_squared, import_mesh.radius_squared);
+	origin_radius_squared = maximum(origin_radius_squared, import_mesh.origin_radius_squared);
+	center_radius_squared = maximum(center_radius_squared, import_mesh.center_radius_squared);
 
 	write((i32)import_mesh.vertex_data.size());
 	write(import_mesh.vertex_data.data(), import_mesh.vertex_data.size());
 
-	write(sqrtf(radius_squared));
+	write(sqrtf(origin_radius_squared));
+	write(sqrtf(center_radius_squared));
 	write(import_mesh.aabb);
 }
 
@@ -1678,7 +1875,8 @@ void FBXImporter::writeGeometry(int mesh_idx, const ImportConfig& cfg)
 void FBXImporter::writeGeometry(const ImportConfig& cfg)
 {
 	AABB aabb = {{0, 0, 0}, {0, 0, 0}};
-	float radius_squared = 0;
+	float origin_radius_squared = 0;
+	float center_radius_squared = 0;
 	OutputMemoryStream vertices_blob(m_allocator);
 	for (const ImportMesh& import_mesh : m_meshes)
 	{
@@ -1704,7 +1902,8 @@ void FBXImporter::writeGeometry(const ImportConfig& cfg)
 			write(&import_mesh.indices[0], sizeof(import_mesh.indices[0]) * import_mesh.indices.size());
 		}
 		aabb.merge(import_mesh.aabb);
-		radius_squared = maximum(radius_squared, import_mesh.radius_squared);
+		origin_radius_squared = maximum(origin_radius_squared, import_mesh.origin_radius_squared);
+		center_radius_squared = maximum(center_radius_squared, import_mesh.center_radius_squared);
 	}
 
 	if (cfg.create_impostor) {
@@ -1726,7 +1925,8 @@ void FBXImporter::writeGeometry(const ImportConfig& cfg)
 		writeImpostorVertices(aabb);
 	}
 
-	write(sqrtf(radius_squared));
+	write(sqrtf(origin_radius_squared) * cfg.radius_scale);
+	write(sqrtf(center_radius_squared) * cfg.radius_scale);
 	write(aabb);
 }
 
@@ -1752,7 +1952,7 @@ void FBXImporter::writeImpostorMesh(const char* dir, const char* model_name)
 	write(gpu::AttributeType::FLOAT);
 	write((u8)2);
 
-	const StaticString<MAX_PATH_LENGTH + 10> material_name(dir, model_name, "_impostor.mat");
+	const StaticString<LUMIX_MAX_PATH + 10> material_name(dir, model_name, "_impostor.mat");
 	i32 length = stringLength(material_name);
 	write(length);
 	write(material_name, length);
@@ -1788,13 +1988,11 @@ void FBXImporter::writeMeshes(const char* src, int mesh_idx, const ImportConfig&
 		write(Mesh::AttributeSemantic::POSITION);
 		write(gpu::AttributeType::FLOAT);
 		write((u8)3);
-		const ofbx::Geometry* geom = mesh.getGeometry();
-		if (geom->getNormals()) {
-			write(Mesh::AttributeSemantic::NORMAL);
-			write(gpu::AttributeType::I8);
-			write((u8)4);
+		write(Mesh::AttributeSemantic::NORMAL);
+		write(gpu::AttributeType::I8);
+		write((u8)4);
 
-		}
+		const ofbx::Geometry* geom = mesh.getGeometry();
 		if (geom->getUVs()) {
 			write(Mesh::AttributeSemantic::TEXCOORD0);
 			write(gpu::AttributeType::FLOAT);
@@ -1823,7 +2021,7 @@ void FBXImporter::writeMeshes(const char* src, int mesh_idx, const ImportConfig&
 		const ofbx::Material* material = import_mesh.fbx_mat;
 		char mat[128];
 		getMaterialName(material, mat);
-		StaticString<MAX_PATH_LENGTH + 128> mat_id(src_info.m_dir, mat, ".mat");
+		StaticString<LUMIX_MAX_PATH + 128> mat_id(src_info.m_dir, mat, ".mat");
 		const i32 len = stringLength(mat_id.data);
 		write(len);
 		write(mat_id.data, len);
@@ -1854,6 +2052,8 @@ void FBXImporter::writeSkeleton(const ImportConfig& cfg)
 {
 	write(m_bones.size());
 
+	u32 idx = 0;
+	m_bind_pose.resize(m_bones.size());
 	for (const ofbx::Object*& node : m_bones)
 	{
 		const char* name = node->name;
@@ -1875,11 +2075,13 @@ void FBXImporter::writeSkeleton(const ImportConfig& cfg)
 		const ImportMesh* mesh = getAnyMeshFromBone(node, int(&node - m_bones.begin()));
 		Matrix tr = toLumix(getBindPoseMatrix(mesh, node));
 		tr.normalizeScale();
+		m_bind_pose[idx] = tr;
 
 		Quat q = fixOrientation(tr.getRotation());
 		Vec3 t = fixOrientation(tr.getTranslation());
 		write(t * cfg.mesh_scale * m_fbx_scale);
 		write(q);
+		++idx;
 	}
 }
 
@@ -1920,11 +2122,8 @@ void FBXImporter::writeLODs(const ImportConfig& cfg)
 
 int FBXImporter::getAttributeCount(const ImportMesh& mesh, bool import_vertex_colors) const
 {
-	int count = 1; // position
-	const bool has_normals = mesh.fbx->getGeometry()->getNormals();
-	const bool has_uvs = mesh.fbx->getGeometry()->getUVs();
-	if (has_normals) ++count;
-	if (has_uvs) ++count;
+	int count = 2; // position & normals
+	if (mesh.fbx->getGeometry()->getUVs()) ++count;
 	if (mesh.fbx->getGeometry()->getColors() && import_vertex_colors) ++count;
 	if (hasTangents(*mesh.fbx->getGeometry())) ++count;
 	if (mesh.is_skinned) count += 2;
@@ -2003,7 +2202,7 @@ void FBXImporter::writePhysics(const char* src, const ImportConfig& cfg)
 
 	if (!to_convex) writePhysicsTriMesh(out_file, cfg);
 
-	const StaticString<MAX_PATH_LENGTH> phy_path(".phy:", src);
+	const StaticString<LUMIX_MAX_PATH> phy_path(".phy:", src);
 	m_compiler.writeCompiledResource(phy_path, Span(out_file.data(), (i32)out_file.size()));
 }
 
@@ -2014,23 +2213,26 @@ void FBXImporter::writePrefab(const char* src, const ImportConfig& cfg)
 	Universe& universe = engine.createUniverse(false);
 
 
-	OS::OutputFile file;
+	os::OutputFile file;
 	PathInfo file_info(src);
-	StaticString<MAX_PATH_LENGTH> tmp(file_info.m_dir, "/", file_info.m_basename, ".fab");
-	if (!m_filesystem.open(tmp, Ref(file))) return;
+	StaticString<LUMIX_MAX_PATH> tmp(file_info.m_dir, "/", file_info.m_basename, ".fab");
+	if (!m_filesystem.open(tmp, file)) {
+		logError("Could not create ", tmp);
+		return;
+	}
 
 	OutputMemoryStream blob(m_allocator);
 	
 	const EntityRef root = universe.createEntity({0, 0, 0}, Quat::IDENTITY);
 
-	static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
+	static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 	for(int i  = 0; i < m_meshes.size(); ++i) {
-		const EntityRef e = universe.createEntity({0, 0, 0}, Quat::IDENTITY);
+		const EntityRef e = universe.createEntity(DVec3(fixOrientation(m_meshes[i].origin) * cfg.mesh_scale * m_fbx_scale), Quat::IDENTITY);
 		universe.createComponent(MODEL_INSTANCE_TYPE, e);
 		universe.setParent(root, e);
 		char mesh_name[256];
 		getImportMeshName(m_meshes[i], mesh_name);
-		StaticString<MAX_PATH_LENGTH> mesh_path(mesh_name, ".fbx:", src);
+		StaticString<LUMIX_MAX_PATH> mesh_path(mesh_name, ".fbx:", src);
 		RenderScene* scene = (RenderScene*)universe.getScene(MODEL_INSTANCE_TYPE);
 		scene->setModelInstancePath(e, Path(mesh_path));
 	}
@@ -2038,7 +2240,9 @@ void FBXImporter::writePrefab(const char* src, const ImportConfig& cfg)
 	engine.serialize(universe, blob);
 	engine.destroyUniverse(universe);
 
-	file.write(blob.data(), blob.size());
+	if (!file.write(blob.data(), blob.size())) {
+		logError("Could not write ", tmp);
+	}
 	file.close();
 }
 
@@ -2061,6 +2265,7 @@ void FBXImporter::writeSubmodels(const char* src, const ImportConfig& cfg)
 			writeSkeleton(cfg);
 		}
 		else {
+			m_bind_pose.clear();
 			write((i32)0);
 		}
 
@@ -2072,7 +2277,7 @@ void FBXImporter::writeSubmodels(const char* src, const ImportConfig& cfg)
 		write(to_mesh);
 		write(factor);
 
-		StaticString<MAX_PATH_LENGTH> resource_locator(name, ".fbx:", src);
+		StaticString<LUMIX_MAX_PATH> resource_locator(name, ".fbx:", src);
 
 		m_compiler.writeCompiledResource(resource_locator, Span(out_file.data(), (i32)out_file.size()));
 	}

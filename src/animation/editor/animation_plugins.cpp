@@ -16,7 +16,6 @@
 #include "engine/os.h"
 #include "controller_editor.h"
 #include "engine/reflection.h"
-#include "engine/serializer.h"
 #include "engine/universe.h"
 #include "renderer/model.h"
 #include "renderer/pose.h"
@@ -26,10 +25,10 @@
 using namespace Lumix;
 
 
-static const ComponentType ANIMABLE_TYPE = Reflection::getComponentType("animable");
-static const ComponentType PROPERTY_ANIMATOR_TYPE = Reflection::getComponentType("property_animator");
-static const ComponentType ANIMATOR_TYPE = Reflection::getComponentType("animator");
-static const ComponentType RENDERABLE_TYPE = Reflection::getComponentType("model_instance");
+static const ComponentType ANIMABLE_TYPE = reflection::getComponentType("animable");
+static const ComponentType PROPERTY_ANIMATOR_TYPE = reflection::getComponentType("property_animator");
+static const ComponentType ANIMATOR_TYPE = reflection::getComponentType("animator");
+static const ComponentType RENDERABLE_TYPE = reflection::getComponentType("model_instance");
 
 
 namespace
@@ -90,10 +89,10 @@ struct PropertyAnimationAssetBrowserPlugin : AssetBrowser::IPlugin
 
 	bool createResource(const char* path) override
 	{
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (!file.open(path))
 		{
-			logError("Animation") << "Failed to create " << path;
+			logError("Failed to create ", path);
 			return false;
 		}
 
@@ -118,10 +117,10 @@ struct PropertyAnimationAssetBrowserPlugin : AssetBrowser::IPlugin
 			const char* cmp_type_name = m_app.getComponentTypeName(cmp.type);
 			if (!ImGui::BeginMenu(cmp_type_name)) continue;
 
-			const Reflection::ComponentBase* component = Reflection::getComponent(cmp.type);
-			struct : Reflection::IEmptyPropertyVisitor
+			const reflection::ComponentBase* component = reflection::getComponent(cmp.type);
+			struct : reflection::IEmptyPropertyVisitor
 			{
-				void visit(const Reflection::Property<float>& prop) override
+				void visit(const reflection::Property<float>& prop) override
 				{
 					int idx = animation->curves.find([&](PropertyAnimation::Curve& rhs) {
 						return rhs.cmp_type == cmp.type && rhs.property == &prop;
@@ -157,11 +156,10 @@ struct PropertyAnimationAssetBrowserPlugin : AssetBrowser::IPlugin
 		if (OutputMemoryStream* file = m_app.getAssetBrowser().beginSaveResource(anim))
 		{
 			bool success = true;
-			TextSerializer serializer(*file);
-			if (!anim.save(serializer))
+			if (!anim.save(*file))
 			{
 				success = false;
-				logError("Editor") << "Could not save file " << anim.getPath().c_str();
+				logError("Could not save file ", anim.getPath());
 			}
 			m_app.getAssetBrowser().endSaveResource(anim, *file, success);
 		}
@@ -218,13 +216,13 @@ struct PropertyAnimationAssetBrowserPlugin : AssetBrowser::IPlugin
 		}
 		int new_count;
 		int last_frame = curve.frames.back();
-		int flags = (int)ImGui::CurveEditorFlags::NO_TANGENTS | (int)ImGui::CurveEditorFlags::SHOW_GRID;
+		int flags = (int)ImGuiEx::CurveEditorFlags::NO_TANGENTS | (int)ImGuiEx::CurveEditorFlags::SHOW_GRID;
 		if (m_fit_curve_in_editor)
 		{
-			flags |= (int)ImGui::CurveEditorFlags::RESET;
+			flags |= (int)ImGuiEx::CurveEditorFlags::RESET;
 			m_fit_curve_in_editor = false;
 		}
-		int changed = ImGui::CurveEditor("curve", (float*)points, curve.frames.size(), size, flags, &new_count, &m_selected_point);
+		int changed = ImGuiEx::CurveEditor("curve", (float*)points, curve.frames.size(), size, flags, &new_count, &m_selected_point);
 		if (changed >= 0)
 		{
 			curve.frames[changed] = int(points[changed].x + 0.5f);
@@ -260,7 +258,7 @@ struct PropertyAnimationAssetBrowserPlugin : AssetBrowser::IPlugin
 			ImGui::InputFloat("##val", &curve.values[m_selected_point]);
 		}
 
-		ImGui::HSplitter("sizer", &size);
+		ImGuiEx::HSplitter("sizer", &size);
 	}
 
 
@@ -281,30 +279,35 @@ struct AnimControllerAssetBrowserPlugin : AssetBrowser::IPlugin, AssetCompiler::
 	explicit AnimControllerAssetBrowserPlugin(StudioApp& app)
 		: m_app(app)
 	{
-		app.getAssetCompiler().registerExtension("act", Anim::Controller::TYPE);
+		app.getAssetCompiler().registerExtension("act", anim::Controller::TYPE);
 	}
 
 	bool compile(const Path& src) override {
 		return m_app.getAssetCompiler().copyCompile(src);
 	}
 
-	void onGUI(Span<Resource*> resources) override {}
+	void onGUI(Span<Resource*> resources) override {
+		if (resources.length() == 1 && ImGui::Button("Open in animation editor")) {
+			m_controller_editor->show(resources[0]->getPath().c_str());
+		}
+	}
 
 
 	void onResourceUnloaded(Resource* resource) override {}
 	const char* getName() const override { return "Animation Controller"; }
-	ResourceType getResourceType() const override { return Anim::Controller::TYPE; }
+	ResourceType getResourceType() const override { return anim::Controller::TYPE; }
 
 
 	bool createTile(const char* in_path, const char* out_path, ResourceType type) override
 	{
 		FileSystem& fs = m_app.getEngine().getFileSystem();
-		if (type == Anim::Controller::TYPE) return fs.copyFile("models/editor/tile_animation_graph.dds", out_path);
+		if (type == anim::Controller::TYPE) return fs.copyFile("models/editor/tile_animation_graph.dds", out_path);
 		return false;
 	}
 
 
 	StudioApp& m_app;
+	anim::ControllerEditor* m_controller_editor = nullptr;
 };
 
 
@@ -377,70 +380,53 @@ struct StudioAppPlugin : StudioApp::IPlugin
 {
 	explicit StudioAppPlugin(StudioApp& app)
 		: m_app(app)
-		, m_anim_editor(nullptr)
-	{
-	}
-
+		, m_animable_plugin(app)
+		, m_animation_plugin(app)
+		, m_prop_anim_plugin(app)
+		, m_anim_ctrl_plugin(app)
+	{}
 
 	const char* getName() const override { return "animation"; }
 
-
 	void init() override
 	{
-		m_app.registerComponent("", "property_animator", "Animation / Property animator", PropertyAnimation::TYPE, "Animation");
-		m_app.registerComponent("", "animable", "Animation / Animable", Animation::TYPE, "Animation");
-		m_app.registerComponent("", "animator", "Animation / Animator", Anim::Controller::TYPE, "Source");
-
-		IAllocator& allocator = m_app.getAllocator();
-		m_animtion_plugin = LUMIX_NEW(allocator, AnimationAssetBrowserPlugin)(m_app);
-		m_prop_anim_plugin = LUMIX_NEW(allocator, PropertyAnimationAssetBrowserPlugin)(m_app);
-		m_anim_ctrl_plugin = LUMIX_NEW(allocator, AnimControllerAssetBrowserPlugin)(m_app);
-		
 		const char* act_exts[] = { "act", nullptr };
-		m_app.getAssetCompiler().addPlugin(*m_anim_ctrl_plugin, act_exts);
+		m_app.getAssetCompiler().addPlugin(m_anim_ctrl_plugin, act_exts);
 
 		AssetBrowser& asset_browser = m_app.getAssetBrowser();
-		asset_browser.addPlugin(*m_animtion_plugin);
-		asset_browser.addPlugin(*m_prop_anim_plugin);
-		asset_browser.addPlugin(*m_anim_ctrl_plugin);
+		asset_browser.addPlugin(m_animation_plugin);
+		asset_browser.addPlugin(m_prop_anim_plugin);
+		asset_browser.addPlugin(m_anim_ctrl_plugin);
 
-		m_animable_plugin = LUMIX_NEW(allocator, AnimablePropertyGridPlugin)(m_app);
-		m_app.getPropertyGrid().addPlugin(*m_animable_plugin);
+		m_app.getPropertyGrid().addPlugin(m_animable_plugin);
 		
-		m_anim_editor = &Anim::ControllerEditor::create(m_app);
+		m_anim_editor = anim::ControllerEditor::create(m_app);
 		m_app.addPlugin(*m_anim_editor);
+
+		m_anim_ctrl_plugin.m_controller_editor = m_anim_editor.get();
 	}
 
 	bool showGizmo(UniverseView&, ComponentUID) override { return false; }
 	
 	~StudioAppPlugin()
 	{
-		m_app.getAssetCompiler().removePlugin(*m_anim_ctrl_plugin);
+		m_app.getAssetCompiler().removePlugin(m_anim_ctrl_plugin);
 
 		AssetBrowser& asset_browser = m_app.getAssetBrowser();
-		asset_browser.removePlugin(*m_animtion_plugin);
-		asset_browser.removePlugin(*m_prop_anim_plugin);
-		asset_browser.removePlugin(*m_anim_ctrl_plugin);
-
-		IAllocator& allocator = m_app.getAllocator();
-		LUMIX_DELETE(allocator, m_animtion_plugin);
-		LUMIX_DELETE(allocator, m_prop_anim_plugin);
-		LUMIX_DELETE(allocator, m_anim_ctrl_plugin);
-
-		m_app.getPropertyGrid().removePlugin(*m_animable_plugin);
-		LUMIX_DELETE(allocator, m_animable_plugin);
-
+		asset_browser.removePlugin(m_animation_plugin);
+		asset_browser.removePlugin(m_prop_anim_plugin);
+		asset_browser.removePlugin(m_anim_ctrl_plugin);
+		m_app.getPropertyGrid().removePlugin(m_animable_plugin);
 		m_app.removePlugin(*m_anim_editor);
-		Anim::ControllerEditor::destroy(*m_anim_editor);
 	}
 
 
 	StudioApp& m_app;
-	AnimablePropertyGridPlugin* m_animable_plugin;
-	AnimationAssetBrowserPlugin* m_animtion_plugin;
-	PropertyAnimationAssetBrowserPlugin* m_prop_anim_plugin;
-	AnimControllerAssetBrowserPlugin* m_anim_ctrl_plugin;
-	Anim::ControllerEditor* m_anim_editor;
+	AnimablePropertyGridPlugin m_animable_plugin;
+	AnimationAssetBrowserPlugin m_animation_plugin;
+	PropertyAnimationAssetBrowserPlugin m_prop_anim_plugin;
+	AnimControllerAssetBrowserPlugin m_anim_ctrl_plugin;
+	UniquePtr<anim::ControllerEditor> m_anim_editor;
 };
 
 

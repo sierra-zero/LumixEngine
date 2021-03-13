@@ -44,7 +44,7 @@ static const DWORD MS_VC_EXCEPTION = 0x406D1388;
 	} THREADNAME_INFO;
 #pragma pack(pop)
 
-static void setThreadName(OS::ThreadID thread_id, const char* thread_name)
+static void setThreadName(os::ThreadID thread_id, const char* thread_name)
 {
 	THREADNAME_INFO info;
 	info.type = 0x1000;
@@ -65,7 +65,7 @@ static DWORD WINAPI threadFunction(LPVOID ptr)
 {
 	struct ThreadImpl* impl = reinterpret_cast<ThreadImpl*>(ptr);
 	setThreadName(impl->m_thread_id, impl->m_thread_name);
-	Profiler::setThreadName(impl->m_thread_name);
+	profiler::setThreadName(impl->m_thread_name);
 	const u32 ret = impl->m_owner->task();
 	impl->m_exited = true;
 	impl->m_is_running = false;
@@ -116,7 +116,7 @@ bool Thread::create(const char* name, bool is_extended)
 
 bool Thread::destroy()
 {
-	while (m_implementation->m_is_running) OS::sleep(1);
+	while (m_implementation->m_is_running) os::sleep(1);
 
 	::CloseHandle(m_implementation->m_handle);
 	m_implementation->m_handle = nullptr;

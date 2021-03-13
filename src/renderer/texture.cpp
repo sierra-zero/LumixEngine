@@ -7,6 +7,7 @@
 #include "engine/profiler.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "renderer/renderer.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
@@ -59,10 +60,8 @@ void Texture::setFlag(Flags flag, bool value)
 
 void Texture::setFlags(u32 flags)
 {
-	if (isReady() && this->flags != flags)
-	{
-		logWarning("Renderer") << "Trying to set different flags for texture " << getPath().c_str()
-									  << ". They are ignored.";
+	if (isReady() && this->flags != flags) {
+		logWarning("Trying to set different flags for texture ", getPath().c_str(), ". They are ignored.");
 		return;
 	}
 	this->flags = flags;
@@ -78,12 +77,12 @@ void Texture::destroy()
 bool Texture::create(u32 w, u32 h, gpu::TextureFormat format, const void* data, u32 size)
 {
 	Renderer::MemRef memory = renderer.copy(data, size);
-	handle = renderer.createTexture(w, h, 1, format, getGPUFlags() | (u32)gpu::TextureFlags::NO_MIPS, memory, getPath().c_str());
+	handle = renderer.createTexture(w, h, 1, format, getGPUFlags() | gpu::TextureFlags::NO_MIPS, memory, getPath().c_str());
 	mips = 1;
 	width = w;
 	height = h;
 
-	const bool isReady = handle.isValid();
+	const bool isReady = handle;
 	onCreated(isReady ? State::READY : State::FAILURE);
 
 	return isReady;
@@ -136,55 +135,6 @@ u32 Texture::getPixel(float x, float y) const
 }
 
 
-unsigned int Texture::compareTGA(IInputStream* file1, IInputStream* file2, int difference, IAllocator& allocator)
-{
-	TGAHeader header1, header2;
-	file1->read(&header1, sizeof(header1));
-	file2->read(&header2, sizeof(header2));
-
-	if (header1.bitsPerPixel != header2.bitsPerPixel ||
-		header1.width != header2.width || header1.height != header2.height ||
-		header1.dataType != header2.dataType ||
-		header1.imageDescriptor != header2.imageDescriptor)
-	{
-		logError("Renderer") << "Trying to compare textures with different formats";
-		return 0xffffFFFF;
-	}
-
-	int color_mode = header1.bitsPerPixel / 8;
-	if (header1.dataType != 2)
-	{
-		logError("Renderer") << "Unsupported texture format";
-		return 0xffffFFFF;
-	}
-
-	int different_pixel_count = 0;
-	size_t pixel_count = header1.width * header1.height;
-	u8* img1 = (u8*)allocator.allocate(pixel_count * color_mode);
-	u8* img2 = (u8*)allocator.allocate(pixel_count * color_mode);
-
-	file1->read(img1, pixel_count * color_mode);
-	file2->read(img2, pixel_count * color_mode);
-
-	for (size_t i = 0; i < pixel_count * color_mode; i += color_mode)
-	{
-		for (int j = 0; j < color_mode; ++j)
-		{
-			if (abs(img1[i + j] - img2[i + j]) > difference)
-			{
-				++different_pixel_count;
-				break;
-			}
-		}
-	}
-
-	allocator.deallocate(img1);
-	allocator.deallocate(img2);
-
-	return different_pixel_count;
-}
-
-
 bool Texture::saveTGA(IOutputStream* file,
 	int width,
 	int height,
@@ -196,7 +146,7 @@ bool Texture::saveTGA(IOutputStream* file,
 {
 	if (format != gpu::TextureFormat::RGBA8)
 	{
-		logError("Renderer") << "Texture " << path.c_str() << " could not be saved, unsupported TGA format";
+		logError("Texture ", path, " could not be saved, unsupported TGA format");
 		return false;
 	}
 
@@ -237,15 +187,14 @@ static void saveTGA(Texture& texture)
 {
 	if (texture.data.empty())
 	{
-		logError("Renderer") << "Texture " << texture.getPath().c_str()
-									<< " could not be saved, no data was loaded";
+		logError("Texture ", texture.getPath(), " could not be saved, no data was loaded");
 		return;
 	}
 
-	OS::OutputFile file;
+	os::OutputFile file;
 	FileSystem& fs = texture.getResourceManager().getOwner().getFileSystem();
-	if (!fs.open(texture.getPath().c_str(), Ref(file))) {
-		logError("Renderer") << "Failed to create file " << texture.getPath();
+	if (!fs.open(texture.getPath().c_str(), file)) {
+		logError("Failed to create file ", texture.getPath());
 		return;
 	}
 
@@ -265,14 +214,13 @@ static void saveTGA(Texture& texture)
 void Texture::save()
 {
 	char ext[5];
-	ext[0] = 0;
-	Path::getExtension(Span(ext), Span(getPath().c_str(), getPath().length()));
+	copyString(Span(ext), Path::getExtension(Span(getPath().c_str(), getPath().length())));
 	if (equalStrings(ext, "raw") && format == gpu::TextureFormat::R16)
 	{
 		FileSystem& fs = m_resource_manager.getOwner().getFileSystem();
-		OS::OutputFile file;
-		if (!fs.open(getPath().c_str(), Ref(file))) {
-			logError("Renderer") << "Failed to create file " << getPath();
+		os::OutputFile file;
+		if (!fs.open(getPath().c_str(), file)) {
+			logError("Failed to create file ", getPath());
 			return;
 		}
 
@@ -284,8 +232,11 @@ void Texture::save()
 		header.height = height;
 		header.depth = depth;
 
-		file.write(&header, sizeof(header));
-		file.write(data.data(), data.size());
+		bool success = file.write(&header, sizeof(header));
+		success = file.write(data.data(), data.size()) && success;
+		if (!success) {
+			logError("Failed to write ", getPath());
+		}
 		file.close();
 	}
 	else if (equalStrings(ext, "tga") && format == gpu::TextureFormat::RGBA8)
@@ -294,7 +245,7 @@ void Texture::save()
 	}
 	else
 	{
-		logError("Renderer") << "Texture " << getPath().c_str() << " can not be saved - unsupported format";
+		logError("Texture ", getPath(), " can not be saved - unsupported format");
 	}
 }
 
@@ -325,11 +276,11 @@ static bool loadRaw(Texture& texture, InputMemoryStream& file, IAllocator& alloc
 	RawTextureHeader header;
 	file.read(&header, sizeof(header));
 	if (header.magic != RawTextureHeader::MAGIC) {
-		logError("Renderer") << texture.getPath() << ": corruptede file or not raw texture format.";
+		logError(texture.getPath(), ": corruptede file or not raw texture format.");
 		return false;
 	}
 	if (header.version > RawTextureHeader::LAST_VERSION) {
-		logError("Renderer") << texture.getPath() << ": unsupported version.";
+		logError(texture.getPath(), ": unsupported version.");
 		return false;
 	}
 
@@ -372,18 +323,18 @@ static bool loadRaw(Texture& texture, InputMemoryStream& file, IAllocator& alloc
 
 	const Renderer::MemRef dst_mem = texture.renderer.copy(data, (u32)size);
 
-	const u32 flag_3d = header.depth > 1 && !header.is_array ? (u32)gpu::TextureFlags::IS_3D : 0;
+	const gpu::TextureFlags flag_3d = header.depth > 1 && !header.is_array ? gpu::TextureFlags::IS_3D : gpu::TextureFlags::NONE;
 
 	texture.handle = texture.renderer.createTexture(texture.width
 		, texture.height
 		, texture.depth
 		, texture.format
-		, (texture.getGPUFlags() & ~(u32)gpu::TextureFlags::SRGB) | flag_3d | (u32)gpu::TextureFlags::NO_MIPS 
+		, (texture.getGPUFlags() & ~gpu::TextureFlags::SRGB) | flag_3d | gpu::TextureFlags::NO_MIPS 
 		, dst_mem
 		, texture.getPath().c_str());
 	texture.mips = 1;
 	texture.is_cubemap = false;
-	return texture.handle.isValid();
+	return texture.handle;
 }
 
 
@@ -417,7 +368,7 @@ bool Texture::loadTGA(IInputStream& file)
 		int w, h, cmp;
 		stbi_uc* stb_data = stbi_load_from_memory(static_cast<const stbi_uc*>(file.getBuffer()) + 7, (int)file.size() - 7, &w, &h, &cmp, 4);
 		if (!stb_data) {
-			logError("Renderer") << "Unsupported texture format " << getPath().c_str();
+			logError("Unsupported texture format ", getPath());
 			return false;
 		}
 		Renderer::MemRef mem;
@@ -439,17 +390,17 @@ bool Texture::loadTGA(IInputStream& file)
 			, header.height
 			, 1
 			, format
-			, getGPUFlags() & ~(u32)gpu::TextureFlags::SRGB
+			, getGPUFlags() & ~gpu::TextureFlags::SRGB
 			, mem
 			, getPath().c_str());
 		depth = 1;
 		layers = 1;
-		return handle.isValid();
+		return handle;
 	}
 
 	if (header.bitsPerPixel < 24)
 	{
-		logError("Renderer") << "Unsupported color mode " << getPath().c_str();
+		logError("Unsupported color mode ", getPath());
 		return false;
 	}
 
@@ -555,12 +506,12 @@ bool Texture::loadTGA(IInputStream& file)
 		, header.height
 		, 1
 		, format
-		, getGPUFlags() & ~(u32)gpu::TextureFlags::SRGB
+		, getGPUFlags() & ~gpu::TextureFlags::SRGB
 		, mem
 		, getPath().c_str());
 	depth = 1;
 	layers = 1;
-	return handle.isValid();
+	return handle;
 }
 
 
@@ -587,7 +538,7 @@ void Texture::removeDataReference()
 static bool loadDDS(Texture& texture, IInputStream& file)
 {
 	if(texture.data_reference > 0) {
-		logError("Renderer") << "Unsupported texture format " << texture.getPath() << " to access on CPU. Convert to TGA or RAW.";
+		logError("Unsupported texture format ", texture.getPath(), " to access on CPU. Convert to TGA or RAW.");
 		return false;
 	}
 
@@ -595,7 +546,7 @@ static bool loadDDS(Texture& texture, IInputStream& file)
 	const u8* data = (const u8*)file.getBuffer();
 	Renderer::MemRef mem = texture.renderer.copy(data + 7, (int)file.size() - 7);
 	texture.handle = texture.renderer.loadTexture(mem, texture.getGPUFlags(), &info, texture.getPath().c_str());
-	if (texture.handle.isValid()) {
+	if (texture.handle) {
 		texture.width = info.width;
 		texture.height = info.height;
 		texture.mips = info.mips;
@@ -604,27 +555,30 @@ static bool loadDDS(Texture& texture, IInputStream& file)
 		texture.is_cubemap = info.is_cubemap;
 	}
 
-	return texture.handle.isValid();
+	return texture.handle;
 }
 
 
-u32 Texture::getGPUFlags() const
+gpu::TextureFlags Texture::getGPUFlags() const
 {
-	u32 gpu_flags = 0;
+	gpu::TextureFlags gpu_flags = gpu::TextureFlags::NONE;
 	if(flags & (u32)Flags::SRGB) {
-		gpu_flags  |= (u32)gpu::TextureFlags::SRGB;
+		gpu_flags = gpu_flags | gpu::TextureFlags::SRGB;
 	}
 	if(flags & (u32)Flags::POINT) {
-		gpu_flags  |= (u32)gpu::TextureFlags::POINT_FILTER;
+		gpu_flags = gpu_flags | gpu::TextureFlags::POINT_FILTER;
+	}
+	if(flags & (u32)Flags::ANISOTROPIC) {
+		gpu_flags = gpu_flags | gpu::TextureFlags::ANISOTROPIC_FILTER;
 	}
 	if (flags & (u32)Flags::CLAMP_U) {
-		gpu_flags |= (u32)gpu::TextureFlags::CLAMP_U;
+		gpu_flags = gpu_flags | gpu::TextureFlags::CLAMP_U;
 	}
 	if (flags & (u32)Flags::CLAMP_V) {
-		gpu_flags |= (u32)gpu::TextureFlags::CLAMP_V;
+		gpu_flags = gpu_flags | gpu::TextureFlags::CLAMP_V;
 	}
 	if (flags & (u32)Flags::CLAMP_W) {
-		gpu_flags |= (u32)gpu::TextureFlags::CLAMP_W;
+		gpu_flags = gpu_flags | gpu::TextureFlags::CLAMP_W;
 	}
 	return gpu_flags;
 }
@@ -633,7 +587,7 @@ u32 Texture::getGPUFlags() const
 bool Texture::load(u64 size, const u8* mem)
 {
 	PROFILE_FUNCTION();
-	Profiler::pushString(getPath().c_str());
+	profiler::pushString(getPath().c_str());
 	char ext[4] = {};
 	InputMemoryStream file(mem, size);
 	if (!file.read(ext, 3)) return false;
@@ -650,7 +604,7 @@ bool Texture::load(u64 size, const u8* mem)
 		loaded = loadTGA(file);
 	}
 	if (!loaded) {
-		logWarning("Renderer") << "Error loading texture " << getPath();
+		logWarning("Error loading texture ", getPath());
 		return false;
 	}
 
@@ -661,7 +615,7 @@ bool Texture::load(u64 size, const u8* mem)
 
 void Texture::unload()
 {
-	if (handle.isValid()) {
+	if (handle) {
 		renderer.destroy(handle);
 		handle = gpu::INVALID_TEXTURE;
 	}

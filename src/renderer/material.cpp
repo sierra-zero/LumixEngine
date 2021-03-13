@@ -36,11 +36,12 @@ Material::Material(const Path& path, ResourceManager& resource_manager, Renderer
 	, m_uniforms(allocator)
 	, m_texture_count(0)
 	, m_renderer(renderer)
-	, m_render_states(u64(gpu::StateFlags::CULL_BACK))
+	, m_render_states(gpu::StateFlags::CULL_BACK)
 	, m_color(1, 1, 1, 1)
 	, m_metallic(0.f)
 	, m_roughness(1.f)
 	, m_emission(0.0f)
+	, m_translucency(0.0f)
 	, m_define_mask(0)
 	, m_custom_flags(0)
 	, m_render_data(nullptr)
@@ -130,7 +131,7 @@ void Material::unload()
 	for (u32 i = 0; i < m_texture_count; i++) {
 		if (m_textures[i]) {
 			removeDependency(*m_textures[i]);
-			m_textures[i]->getResourceManager().unload(*m_textures[i]);
+			m_textures[i]->decRefCount();
 		}
 	}
 	m_texture_count = 0;
@@ -146,13 +147,14 @@ void Material::unload()
 	setShader(nullptr);
 
 	m_alpha_ref = 0.3f;
-	m_color.set(1, 1, 1, 1);
+	m_color = Vec4(1, 1, 1, 1);
 	m_custom_flags = 0;
 	m_define_mask = 0;
 	m_metallic = 0.0f;
 	m_roughness = 1.0f;
 	m_emission = 0.0f;
-	m_render_states = u64(gpu::StateFlags::CULL_BACK);
+	m_translucency = 0.0f;
+	m_render_states = gpu::StateFlags::CULL_BACK;
 }
 
 
@@ -165,6 +167,7 @@ bool Material::save(IOutputStream& file)
 	file << "backface_culling(" << (isBackfaceCulling() ? "true" : "false") << ")\n";
 	file << "layer \"" << m_renderer.getLayerName(m_layer) << "\"\n";
 
+	file << "translucency(" <<  m_translucency << ")\n";
 	file << "emission(" <<  m_emission << ")\n";
 	file << "metallic(" <<  m_metallic << ")\n";
 	file << "roughness(" <<  m_roughness << ")\n";
@@ -184,14 +187,14 @@ bool Material::save(IOutputStream& file)
 	file << "color { " << m_color.x << ", " << m_color.y << ", " << m_color.z << ", " << m_color.w << " }\n";
 
 	for (u32 i = 0; i < m_texture_count; ++i) {
-		char path[MAX_PATH_LENGTH];
+		char path[LUMIX_MAX_PATH];
 		if (m_textures[i] && m_textures[i] != m_shader->m_texture_slots[i].default_texture) {
 			copyString(Span(path), m_textures[i]->getPath().c_str());
+			file << "texture \"/" << path << "\"\n";
 		}
 		else {
-			path[0] = '\0';
+			file << "texture \"\"\n";
 		}
-		file << "texture \"/" << path << "\"\n";
 	}
 
 	file << "layer \"" << m_renderer.getLayerName(m_layer) << "\"\n";
@@ -284,7 +287,8 @@ void Material::setTexture(u32 i, Texture* texture)
 	if (!texture && m_shader && m_shader->isReady() && m_shader->m_texture_slots[i].default_texture)
 	{
 		texture = m_shader->m_texture_slots[i].default_texture;
-		texture->getResourceManager().load(*texture);
+		ASSERT(texture->wantReady());
+		texture->incRefCount();
 	}
 	if (texture) addDependency(*texture);
 	m_textures[i] = texture;
@@ -292,7 +296,7 @@ void Material::setTexture(u32 i, Texture* texture)
 
 	if (old_texture) {
 		removeDependency(*old_texture);
-		old_texture->getResourceManager().unload(*old_texture);
+		old_texture->decRefCount();
 	}
 	if (isReady() && m_shader)
 	{
@@ -325,50 +329,23 @@ void Material::onBeforeReady()
 {
 	if (!m_shader) return;
 
-	for(u32 i = 0; i < m_shader->m_texture_slot_count; ++i) {
+	for (u32 i = 0; i < m_shader->m_texture_slot_count; ++i) {
 		if (!m_textures[i] && m_shader->m_texture_slots[i].default_texture) {
 			m_textures[i] = m_shader->m_texture_slots[i].default_texture;
 			if (i >= m_texture_count) m_texture_count = i + 1;
-			m_textures[i]->getResourceManager().load(*m_textures[i]);
+			ASSERT(m_textures[i]->wantReady());
+			m_textures[i]->incRefCount();
 			addDependency(*m_textures[i]);
 			return;
 		}
 	}
 
-	for(int i = 0; i < m_shader->m_uniforms.size(); ++i)
-	{
-		const Shader::Uniform& shader_uniform = m_shader->m_uniforms[i];
-		bool found = false;
-		for(int j = i; j < m_uniforms.size(); ++j)
-		{
-			if(m_uniforms[j].name_hash == shader_uniform.name_hash)
-			{
-				auto tmp = m_uniforms[i];
-				m_uniforms[i] = m_uniforms[j];
-				m_uniforms[j] = tmp;
-				found = true;
-				break;
-			}
-		}
-		if(found) continue;
-		if(i < m_uniforms.size())
-		{
-			m_uniforms.emplace(m_uniforms[i]);
-		}
-		else
-		{
-			m_uniforms.emplace();
-		}
-		m_uniforms[i].name_hash = shader_uniform.name_hash;
-	}
-
-	for(u32 i = 0; i < m_shader->m_texture_slot_count; ++i) {
+	for (u32 i = 0; i < m_shader->m_texture_slot_count; ++i) {
 		const int define_idx = m_shader->m_texture_slots[i].define_idx;
-		if(define_idx >= 0) {
-			if(m_textures[i]) {
+		if (define_idx >= 0) {
+			if (m_textures[i]) {
 				m_define_mask |= 1 << define_idx;
-			}
-			else {
+			} else {
 				m_define_mask &= ~(1 << define_idx);
 			}
 		}
@@ -403,16 +380,22 @@ void Material::updateRenderData(bool on_before_ready)
 	static_assert(sizeof(cs) == 256, "Renderer::MaterialConstants must have 256B");
 	cs.color = m_color;
 	cs.emission = m_emission;
+	cs.translucency = m_translucency;
 	cs.metallic = m_metallic;
 	cs.roughness = m_roughness;
 	memset(cs.custom, 0, sizeof(cs.custom));
 	for (const Shader::Uniform& shader_uniform : m_shader->m_uniforms) {
+		bool found = false;
+		const u32 size = shader_uniform.size();
 		for (Uniform& mat_uniform : m_uniforms) {
 			if (shader_uniform.name_hash == mat_uniform.name_hash) {
-				const u32 size = shader_uniform.size();
 				memcpy((u8*)cs.custom + shader_uniform.offset, mat_uniform.matrix, size);
+				found = true;
 				break;
 			}
+		}
+		if (!found) {
+			memcpy((u8*)cs.custom + shader_uniform.offset, shader_uniform.default_value.matrix, size);
 		}
 	}
 
@@ -430,7 +413,7 @@ void Material::setShader(Shader* shader)
 		Shader* shader = m_shader;
 		m_shader = nullptr;
 		removeDependency(*shader);
-		shader->getResourceManager().unload(*shader);
+		shader->decRefCount();
 	}
 	m_shader = shader;
 	if (m_shader) {
@@ -470,17 +453,17 @@ bool Material::isTextureDefine(u8 define_idx) const
 void Material::enableBackfaceCulling(bool enable)
 {
 	if (enable) {
-		m_render_states |= (u64)gpu::StateFlags::CULL_BACK;
+		m_render_states = m_render_states | gpu::StateFlags::CULL_BACK;
 	}
 	else {
-		m_render_states &= ~(u64)gpu::StateFlags::CULL_BACK;
+		m_render_states = m_render_states & ~gpu::StateFlags::CULL_BACK;
 	}
 }
 
 
 bool Material::isBackfaceCulling() const
 {
-	return (m_render_states & (u64)gpu::StateFlags::CULL_BACK) != 0;
+	return u64(m_render_states & gpu::StateFlags::CULL_BACK);
 }
 
 
@@ -589,6 +572,18 @@ int emission(lua_State* L)
 }
 
 
+int translucency(lua_State* L)
+{
+	const float m = LuaWrapper::checkArg<float>(L, 1);
+	lua_getfield(L, LUA_GLOBALSINDEX, "this");
+	Material* material = (Material*)lua_touserdata(L, -1);
+	lua_pop(L, 1);
+
+	material->setTranslucency(m);
+	return 0;
+}
+
+
 int defines(lua_State* L)
 {
 	lua_getfield(L, LUA_GLOBALSINDEX, "this");
@@ -618,8 +613,8 @@ int texture(lua_State* L)
 	lua_getfield(L, LUA_GLOBALSINDEX, "this");
 	Material* material = (Material*)lua_touserdata(L, -1);
 	lua_pop(L, 1);
-	char material_dir[MAX_PATH_LENGTH];
-	Path::getDir(Span(material_dir), material->getPath().c_str());
+	char material_dir[LUMIX_MAX_PATH];
+	copyString(Span(material_dir), Path::getDir(material->getPath().c_str()));
 
 	if (lua_istable(L, 1)) {
 		lua_getfield(L, 1, "source");
@@ -627,7 +622,7 @@ int texture(lua_State* L)
 			const char* path = lua_tostring(L, -1);
 			const int idx = material->getTextureCount();
 			
-			char texture_path[MAX_PATH_LENGTH];
+			char texture_path[LUMIX_MAX_PATH];
 			if (path[0] != '/' && path[0] != '\\' && path[0] != '\0')
 			{
 				copyString(texture_path, material_dir);
@@ -641,7 +636,7 @@ int texture(lua_State* L)
 			material->setTexturePath(idx, Path(texture_path));
 		}
 		else {
-			logError("Renderer") << material->getPath() << " texture's source is not a string.";
+			logError(material->getPath(), " texture's source is not a string.");
 			lua_pop(L, 1);
 			return 0;
 		}
@@ -659,7 +654,7 @@ int texture(lua_State* L)
 	const char* path = LuaWrapper::checkArg<const char*>(L, 1);
 	const int idx = material->getTextureCount();
 	
-	char texture_path[MAX_PATH_LENGTH];
+	char texture_path[LUMIX_MAX_PATH];
 	if (path[0] != '/' && path[0] != '\\' && path[0] != '\0')
 	{
 		copyString(texture_path, material_dir);
@@ -686,7 +681,7 @@ bool Material::load(u64 size, const u8* mem)
 	lua_State* L = mng.getState(*this);
 	
 	m_uniforms.clear();
-	m_render_states = u64(gpu::StateFlags::CULL_BACK);
+	m_render_states = gpu::StateFlags::CULL_BACK;
 	m_custom_flags = 0;
 	setAlphaRef(DEFAULT_ALPHA_REF_VALUE);
 
@@ -696,7 +691,7 @@ bool Material::load(u64 size, const u8* mem)
 	}
 
 	if (!m_shader) {
-		logError("Renderer") << "Material " << getPath() << " does not have a shader.";
+		logError("Material ", getPath(), " does not have a shader.");
 		return false;
 	}
 
@@ -730,6 +725,7 @@ MaterialManager::MaterialManager(Renderer& renderer, IAllocator& allocator)
 	DEFINE_LUA_FUNC(custom_flag);
 	DEFINE_LUA_FUNC(defines);
 	DEFINE_LUA_FUNC(emission);
+	DEFINE_LUA_FUNC(translucency);
 	DEFINE_LUA_FUNC(layer);
 	DEFINE_LUA_FUNC(metallic);
 	DEFINE_LUA_FUNC(roughness);

@@ -8,24 +8,17 @@ namespace Lumix
 {
 
 
-struct LUMIX_ENGINE_API ResourceManager
-{
+struct LUMIX_ENGINE_API ResourceManager {
 	friend struct Resource;
 	friend struct ResourceManagerHub;
-public:
 	using ResourceTable = HashMap<u32, struct Resource*, HashFuncDirect<u32>>;
 
-public:
 	void create(struct ResourceType type, struct ResourceManagerHub& owner);
 	void destroy();
 
 	void enableUnload(bool enable);
 
-	void load(Resource& resource);
 	void removeUnreferenced();
-
-	void unload(const struct Path& path);
-	void unload(Resource& resource);
 
 	void reload(const Path& path);
 	void reload(Resource& resource);
@@ -49,20 +42,16 @@ protected:
 };
 
 
-struct LUMIX_ENGINE_API ResourceManagerHub
-{
+struct LUMIX_ENGINE_API ResourceManagerHub {
 	using ResourceManagerTable = HashMap<u32, ResourceManager*>;
 
-public:
-	struct LUMIX_ENGINE_API LoadHook
-	{
+	struct LUMIX_ENGINE_API LoadHook {
 		enum class Action { IMMEDIATE, DEFERRED };
 		virtual ~LoadHook() {}
 		virtual Action onBeforeLoad(Resource& res) = 0;
 		void continueLoad(Resource& res);
 	};
 
-public:
 	explicit ResourceManagerHub(IAllocator& allocator);
 	~ResourceManagerHub();
 	ResourceManagerHub(const ResourceManagerHub& rhs) = delete;
@@ -86,6 +75,7 @@ public:
 	void add(ResourceType type, ResourceManager* rm);
 	void remove(ResourceType type);
 	void reload(const Path& path);
+	void reloadAll();
 	void removeUnreferenced();
 	void enableUnload(bool enable);
 

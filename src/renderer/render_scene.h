@@ -49,6 +49,29 @@ struct Camera
 	bool is_ortho;
 };
 
+struct Decal {
+	Material* material = nullptr;
+	Transform transform;
+	float radius;
+	EntityRef entity;
+	EntityPtr prev_decal = INVALID_ENTITY;
+	EntityPtr next_decal = INVALID_ENTITY;
+	Vec3 half_extents;
+	Vec2 uv_scale;
+};
+
+struct CurveDecal {
+	Material* material = nullptr;
+	Transform transform;
+	float radius;
+	EntityRef entity;
+	EntityPtr prev_decal = INVALID_ENTITY;
+	EntityPtr next_decal = INVALID_ENTITY;
+	Vec3 half_extents;
+	Vec2 uv_scale;
+	Vec2 bezier_p0;
+	Vec2 bezier_p2;
+};
 
 struct TerrainInfo
 {
@@ -62,12 +85,12 @@ struct TerrainInfo
 
 struct Environment
 {
-	enum Flags : u32{
+	enum Flags : u32 {
 		CAST_SHADOWS = 1 << 0
 	};
 
-	Vec3 diffuse_color;
-	float diffuse_intensity;
+	Vec3 light_color;
+	float direct_intensity;
 	float indirect_intensity;
 	EntityRef entity;
 	Vec4 cascades;
@@ -98,11 +121,14 @@ struct ReflectionProbe
 		ENABLED = 1 << 2,
 	};
 
-	Texture* texture = nullptr;
 	u64 guid;
 	FlagSet<Flags, u32> flags;
 	u32 size = 128;
 	Vec3 half_extents = Vec3(100, 100, 100);
+	u32 texture_id = 0xffFFffFF;
+
+	struct LoadJob;
+	LoadJob* load_job = nullptr;
 };
 
 struct EnvironmentProbe
@@ -131,16 +157,18 @@ struct ModelInstance
 	{
 		IS_BONE_ATTACHMENT_PARENT = 1 << 0,
 		ENABLED = 1 << 1,
-		VALID = 1 << 2
+		VALID = 1 << 2,
 	};
 
 	Model* model;
 	Mesh* meshes;
 	Pose* pose;
+	Material* custom_material = nullptr; 
 	EntityPtr next_model = INVALID_ENTITY;
 	EntityPtr prev_model = INVALID_ENTITY;
+	float lod = 4;
 	FlagSet<Flags, u8> flags;
-	u8 mesh_count;
+	u16 mesh_count;
 };
 
 
@@ -186,32 +214,35 @@ enum class RenderableTypes : u8 {
 	SKINNED,
 	DECAL,
 	LOCAL_LIGHT,
+	MESH_MATERIAL_OVERRIDE,
+	FUR,
+	CURVE_DECAL,
 
 	COUNT
 };
 
 
-struct TextMeshVertex
-{
-	Vec3 pos;
-	u32 color;
-	Vec2 tex_coord;
+struct FurComponent {
+	u32 layers = 16;
+	float scale = 0.01f;
+	float gravity = 1.f;
+	bool enabled = true;
 };
-
 
 struct LUMIX_RENDERER_API RenderScene : IScene
 {
-	static RenderScene* createInstance(Renderer& renderer,
+	static UniquePtr<RenderScene> createInstance(Renderer& renderer,
 		Engine& engine,
 		Universe& universe,
 		IAllocator& allocator);
-	static void destroyInstance(RenderScene* scene);
 	static void registerLuaAPI(lua_State* L);
+	static void reflect();
 
 	virtual RayCastModelHit castRay(const DVec3& origin, const Vec3& dir, EntityPtr ignore) = 0;
 	virtual RayCastModelHit castRayTerrain(EntityRef entity, const DVec3& origin, const Vec3& dir) = 0;
 	virtual void getRay(EntityRef entity, const Vec2& screen_pos, DVec3& origin, Vec3& dir) = 0;
 
+	virtual void setActiveCamera(EntityRef camera) = 0;
 	virtual EntityPtr getActiveCamera() const = 0;
 	virtual	struct Viewport getCameraViewport(EntityRef camera) const = 0;
 	virtual float getCameraLODMultiplier(float fov, bool is_ortho) const = 0;
@@ -221,6 +252,8 @@ struct LUMIX_RENDERER_API RenderScene : IScene
 	virtual float getTime() const = 0;
 	virtual Engine& getEngine() const = 0;
 	virtual IAllocator& getAllocator() = 0;
+	virtual void setGlobalLODMultiplier(float multiplier) = 0;
+	virtual float getGlobalLODMultiplier() const = 0;
 
 	virtual Pose* lockPose(EntityRef entity) = 0;
 	virtual void unlockPose(EntityRef entity, bool changed) = 0;
@@ -248,6 +281,9 @@ struct LUMIX_RENDERER_API RenderScene : IScene
 	virtual void setBoneAttachmentRotation(EntityRef entity, const Vec3& rot) = 0;
 	virtual void setBoneAttachmentRotationQuat(EntityRef entity, const Quat& rot) = 0;
 
+	virtual HashMap<EntityRef, FurComponent>& getFurs() = 0;
+	virtual FurComponent& getFur(EntityRef e) = 0;
+
 	virtual void clearDebugLines() = 0;
 	virtual void clearDebugTriangles() = 0;
 	virtual const Array<DebugTriangle>& getDebugTriangles() const = 0;
@@ -262,25 +298,45 @@ struct LUMIX_RENDERER_API RenderScene : IScene
 
 	virtual void setParticleEmitterPath(EntityRef entity, const Path& path) = 0;
 	virtual Path getParticleEmitterPath(EntityRef entity) = 0;
+	virtual void setParticleEmitterRate(EntityRef entity, u32 value) = 0;
+	virtual u32 getParticleEmitterRate(EntityRef entity) = 0;
+	virtual void updateParticleEmitter(EntityRef entity, float dt) = 0;
 	virtual const AssociativeArray<EntityRef, struct ParticleEmitter*>& getParticleEmitters() const = 0;
 
 	virtual void enableModelInstance(EntityRef entity, bool enable) = 0;
 	virtual bool isModelInstanceEnabled(EntityRef entity) = 0;
 	virtual ModelInstance* getModelInstance(EntityRef entity) = 0;
 	virtual const MeshSortData* getMeshSortData() const = 0;
-	virtual const ModelInstance* getModelInstances() const = 0;
+	virtual Span<const ModelInstance> getModelInstances() const = 0;
+	virtual Span<ModelInstance> getModelInstances() = 0;
 	virtual Path getModelInstancePath(EntityRef entity) = 0;
+	virtual void setModelInstanceLOD(EntityRef entity, u32 lod) = 0;
 	virtual void setModelInstancePath(EntityRef entity, const Path& path) = 0;
+	virtual void setModelInstanceMaterialOverride(EntityRef entity, const Path& path) = 0;
+	virtual Path getModelInstanceMaterialOverride(EntityRef entity) = 0;
 	virtual CullResult* getRenderables(const ShiftedFrustum& frustum, RenderableTypes type) const = 0;
+	virtual CullResult* getRenderables(const ShiftedFrustum& frustum) const = 0;
 	virtual EntityPtr getFirstModelInstance() = 0;
 	virtual EntityPtr getNextModelInstance(EntityPtr entity) = 0;
 	virtual Model* getModelInstanceModel(EntityRef entity) = 0;
 
+	virtual CurveDecal& getCurveDecal(EntityRef entity) = 0;
+	virtual void setCurveDecalMaterialPath(EntityRef entity, const Path& path) = 0;
+	virtual Path getCurveDecalMaterialPath(EntityRef entity) = 0;
+	virtual void setCurveDecalHalfExtents(EntityRef entity, float value) = 0;
+	virtual float getCurveDecalHalfExtents(EntityRef entity) = 0;
+	virtual void setCurveDecalUVScale(EntityRef entity, const Vec2& value) = 0;
+	virtual Vec2 getCurveDecalUVScale(EntityRef entity) = 0;
+	virtual void setCurveDecalBezierP0(EntityRef entity, const Vec2& value) = 0;
+	virtual Vec2 getCurveDecalBezierP0(EntityRef entity) = 0;
+	virtual void setCurveDecalBezierP2(EntityRef entity, const Vec2& value) = 0;
+	virtual Vec2 getCurveDecalBezierP2(EntityRef entity) = 0;
+
+	virtual Decal& getDecal(EntityRef entity) = 0;
 	virtual void setDecalMaterialPath(EntityRef entity, const Path& path) = 0;
 	virtual Path getDecalMaterialPath(EntityRef entity) = 0;
 	virtual void setDecalHalfExtents(EntityRef entity, const Vec3& value) = 0;
 	virtual Vec3 getDecalHalfExtents(EntityRef entity) = 0;
-	virtual Material* getDecalMaterial(EntityRef entity) const = 0;
 
 	virtual Terrain* getTerrain(EntityRef entity) = 0;
 	virtual const HashMap<EntityRef, Terrain*>& getTerrains() = 0;
@@ -306,8 +362,8 @@ struct LUMIX_RENDERER_API RenderScene : IScene
 	virtual void setGrassDistance(EntityRef entity, int index, float value) = 0;
 	virtual void setGrassPath(EntityRef entity, int index, const Path& path) = 0;
 	virtual Path getGrassPath(EntityRef entity, int index) = 0;
-	virtual void setGrassDensity(EntityRef entity, int index, int density) = 0;
-	virtual int getGrassDensity(EntityRef entity, int index) = 0;
+	virtual void setGrassSpacing(EntityRef entity, int index, float spacing) = 0;
+	virtual float getGrassSpacing(EntityRef entity, int index) = 0;
 	virtual int getGrassCount(EntityRef entity) = 0;
 	virtual void addGrass(EntityRef entity, int index) = 0;
 	virtual void removeGrass(EntityRef entity, int index) = 0;
@@ -329,25 +385,14 @@ struct LUMIX_RENDERER_API RenderScene : IScene
 	virtual void enableReflectionProbe(EntityRef entity, bool enable) = 0;
 	virtual bool isReflectionProbeEnabled(EntityRef entity) = 0;
 	virtual Span<const ReflectionProbe> getReflectionProbes() = 0;
+	virtual gpu::TextureHandle getReflectionProbesTexture() = 0;
+	virtual void reloadReflectionProbes() = 0;
 
 	virtual Span<EntityRef> getEnvironmentProbesEntities() = 0;
 	virtual EnvironmentProbe& getEnvironmentProbe(EntityRef entity) = 0;
 	virtual void enableEnvironmentProbe(EntityRef entity, bool enable) = 0;
 	virtual bool isEnvironmentProbeEnabled(EntityRef entity) = 0;
 	virtual Span<const EnvironmentProbe> getEnvironmentProbes() = 0;
-
-	virtual void setTextMeshText(EntityRef entity, const char* text) = 0;
-	virtual const char* getTextMeshText(EntityRef entity) = 0;
-	virtual void setTextMeshFontSize(EntityRef entity, int value) = 0;
-	virtual int getTextMeshFontSize(EntityRef entity) = 0;
-	virtual Vec4 getTextMeshColorRGBA(EntityRef entity) = 0;
-	virtual void setTextMeshColorRGBA(EntityRef entity, const Vec4& color) = 0;
-	virtual Path getTextMeshFontPath(EntityRef entity) = 0;
-	virtual void setTextMeshFontPath(EntityRef entity, const Path& path) = 0;
-	virtual bool isTextMeshCameraOriented(EntityRef entity) = 0;
-	virtual void setTextMeshCameraOriented(EntityRef entity, bool is_oriented) = 0;
-	virtual void getTextMeshesVertices(TextMeshVertex* vertices, const DVec3& cam_pos, const Quat& rot) = 0;
-	virtual u32 getTextMeshesVerticesCount() const = 0;
 };
 
 }

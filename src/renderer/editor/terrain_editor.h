@@ -45,7 +45,7 @@ public:
 
 	bool onMouseDown(UniverseView& view, int, int) override;
 	void onMouseMove(UniverseView& view, int x, int y, int /*rel_x*/, int /*rel_y*/) override;
-	void onMouseUp(UniverseView& view, int, int, OS::MouseButton) override {};
+	void onMouseUp(UniverseView& view, int, int, os::MouseButton) override {};
 	void onGUI();
 	void setComponent(ComponentUID cmp) { m_component = cmp; }
 
@@ -68,6 +68,7 @@ private:
 	u16 getHeight(const DVec3& world_pos) const;
 	Texture* getHeightmap() const;
 	DVec3 getRelativePosition(const DVec3& world_pos) const;
+	void exportToOBJ();
 
 private:
 	WorldEditor& m_world_editor;
@@ -85,10 +86,10 @@ private:
 	Vec3 m_color;
 	int m_current_brush;
 	Array<PrefabResource*> m_selected_prefabs;
-	Action* m_lower_terrain_action;
-	Action* m_smooth_terrain_action;
-	Action* m_remove_entity_action;
-	Action* m_remove_grass_action;
+	Action m_lower_terrain_action;
+	Action m_smooth_terrain_action;
+	Action m_remove_entity_action;
+	Action m_remove_grass_action;
 	Array<bool> m_brush_mask;
 	Texture* m_brush_texture;
 	Vec2 m_size_spread;
@@ -97,6 +98,7 @@ private:
 	bool m_is_rotate_x;
 	bool m_is_rotate_y;
 	bool m_is_rotate_z;
+	bool m_ignore_entities_not_in_folder = false;
 	bool m_is_enabled;
 	Vec2 m_rotate_x_spread;
 	Vec2 m_rotate_y_spread;
@@ -105,8 +107,8 @@ private:
 	Path m_albedo_composite_path;
 
 	struct {
-		char albedo[MAX_PATH_LENGTH] = "";
-		char normal[MAX_PATH_LENGTH] = "";
+		char albedo[LUMIX_MAX_PATH] = "";
+		char normal[LUMIX_MAX_PATH] = "";
 	} m_add_layer_popup;
 };
 

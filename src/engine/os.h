@@ -8,13 +8,11 @@
 #endif
 
 
-namespace Lumix
-{
+namespace Lumix {
 
 struct IAllocator;
 
-namespace OS
-{
+namespace os {
 
 #ifdef _WIN32
 	using ThreadID = u32;
@@ -35,15 +33,13 @@ enum class CursorType : u32 {
 	UNDEFINED
 };
 
-enum class ExecuteOpenResult : int
-{
+enum class ExecuteOpenResult : i32 {
 	SUCCESS,
 	NO_ASSOCIATION,
 	OTHER_ERROR
 };
 
-enum class MouseButton : int 
-{
+enum class MouseButton : i32 {
     LEFT = 0,
     RIGHT = 1,
     MIDDLE = 2,
@@ -89,8 +85,7 @@ struct Event {
 };
 
 
-struct InitWindowArgs
-{
+struct InitWindowArgs {
 	enum Flags {
 		NO_DECORATION = 1 << 0,
 		NO_TASKBAR_ICON = 1 << 1
@@ -103,13 +98,6 @@ struct InitWindowArgs
 };
 
 
-struct LUMIX_ENGINE_API Interface
-{
-	virtual ~Interface() {}
-    virtual void onEvent(const Event& event) = 0;
-    virtual void onInit() = 0;
-    virtual void onIdle() = 0;
-};
 
 struct Monitor {
 	Rect work_rect;
@@ -117,49 +105,41 @@ struct Monitor {
 	bool primary;
 };
 	
-struct LUMIX_ENGINE_API InputFile final : IInputStream
-{
-public:
+struct LUMIX_ENGINE_API InputFile final : IInputStream {
 	InputFile();
 	~InputFile();
 
-	bool open(const char* path);
+	[[nodiscard]] bool open(const char* path);
 	void close();
-
-	bool read(void* data, u64 size) override;
+	
+	using IInputStream::read;
+	[[nodiscard]] bool read(void* data, u64 size) override;
 	const void* getBuffer() const override { return nullptr; }
 
 	u64 size() const override;
 	u64 pos();
 
-	bool seek(u64 pos);
+	[[nodiscard]] bool seek(u64 pos);
 	
 private:
 	void* m_handle;
 };
 	
 
-struct LUMIX_ENGINE_API OutputFile final : IOutputStream
-{
-public:
+struct LUMIX_ENGINE_API OutputFile final : IOutputStream {
 	OutputFile();
 	~OutputFile();
 
-	bool open(const char* path);
+	[[nodiscard]] bool open(const char* path);
 	void close();
 	void flush();
     bool isError() const { return m_is_error; }
 
-	bool write(const void* data, u64 size) override;
-
-	OutputFile& operator <<(const char* text);
-	OutputFile& operator <<(char c) { write(&c, sizeof(c)); return *this; }
-	OutputFile& operator <<(i32 value);
-	OutputFile& operator <<(u32 value);
-	OutputFile& operator <<(u64 value);
-	OutputFile& operator <<(float value);
+	using IOutputStream::write;
+	[[nodiscard]] bool write(const void* data, u64 size) override;
 
 private:
+	OutputFile(const OutputFile&) = delete;
 	void* m_handle;
     bool m_is_error;
 };
@@ -167,7 +147,7 @@ private:
 
 struct FileInfo {
 	bool is_directory;
-	char filename[MAX_PATH_LENGTH];
+	char filename[LUMIX_MAX_PATH];
 };
 
 struct FileIterator;
@@ -194,26 +174,24 @@ LUMIX_ENGINE_API bool getNextFile(FileIterator* iterator, FileInfo* info);
 
 LUMIX_ENGINE_API void setCurrentDirectory(const char* path);
 LUMIX_ENGINE_API void getCurrentDirectory(Span<char> path);
-LUMIX_ENGINE_API bool getOpenFilename(Span<char> out, const char* filter, const char* starting_file);
-LUMIX_ENGINE_API bool getSaveFilename(Span<char> out, const char* filter, const char* default_extension);
-LUMIX_ENGINE_API bool getOpenDirectory(Span<char> out, const char* starting_dir);
+LUMIX_ENGINE_API [[nodiscard]] bool getOpenFilename(Span<char> out, const char* filter, const char* starting_file);
+LUMIX_ENGINE_API [[nodiscard]] bool getSaveFilename(Span<char> out, const char* filter, const char* default_extension);
+LUMIX_ENGINE_API [[nodiscard]] bool getOpenDirectory(Span<char> out, const char* starting_dir);
 LUMIX_ENGINE_API ExecuteOpenResult shellExecuteOpen(const char* path);
 LUMIX_ENGINE_API ExecuteOpenResult openExplorer(const char* path);
 LUMIX_ENGINE_API void copyToClipboard(const char* text);
 
 LUMIX_ENGINE_API bool deleteFile(const char* path);
-LUMIX_ENGINE_API bool moveFile(const char* from, const char* to);
+LUMIX_ENGINE_API [[nodiscard]] bool moveFile(const char* from, const char* to);
 LUMIX_ENGINE_API size_t getFileSize(const char* path);
 LUMIX_ENGINE_API bool fileExists(const char* path);
 LUMIX_ENGINE_API bool dirExists(const char* path);
 LUMIX_ENGINE_API u64 getLastModified(const char* file);
-LUMIX_ENGINE_API bool makePath(const char* path);
+LUMIX_ENGINE_API [[nodiscard]] bool makePath(const char* path);
 
 LUMIX_ENGINE_API void setCursor(CursorType type);
 LUMIX_ENGINE_API void clipCursor(int screen_x, int screen_y, int w, int h);
 LUMIX_ENGINE_API void unclipCursor();
-
-LUMIX_ENGINE_API void quit();
 
 LUMIX_ENGINE_API void getDropFile(const Event& event, int idx, Span<char> out);
 LUMIX_ENGINE_API int getDropFileCount(const Event& event);
@@ -226,6 +204,7 @@ LUMIX_ENGINE_API void showCursor(bool show);
 LUMIX_ENGINE_API u32 getMonitors(Span<Monitor> monitors);
 LUMIX_ENGINE_API Point toScreen(WindowHandle win, int x, int y);
 LUMIX_ENGINE_API WindowHandle createWindow(const InitWindowArgs& args);
+LUMIX_ENGINE_API bool getEvent(Event& event);
 LUMIX_ENGINE_API void destroyWindow(WindowHandle wnd);
 LUMIX_ENGINE_API Rect getWindowScreenRect(WindowHandle win);
 LUMIX_ENGINE_API Rect getWindowClientRect(WindowHandle win);
@@ -241,7 +220,7 @@ LUMIX_ENGINE_API bool isKeyDown(Keycode keycode);
 LUMIX_ENGINE_API void getKeyName(Keycode keycode, Span<char> out);
 LUMIX_ENGINE_API int getDPI();
 
-LUMIX_ENGINE_API bool copyFile(const char* from, const char* to);
+LUMIX_ENGINE_API [[nodiscard]] bool copyFile(const char* from, const char* to);
 LUMIX_ENGINE_API void getExecutablePath(Span<char> path);
 LUMIX_ENGINE_API void messageBox(const char* text);
 LUMIX_ENGINE_API void setCommandLine(int, char**);
@@ -250,10 +229,22 @@ LUMIX_ENGINE_API void* loadLibrary(const char* path);
 LUMIX_ENGINE_API void unloadLibrary(void* handle);
 LUMIX_ENGINE_API void* getLibrarySymbol(void* handle, const char* name);
 
-LUMIX_ENGINE_API void run(Interface& iface);
+struct LUMIX_ENGINE_API Timer {
+	Timer();
 
-enum class Keycode : u8
-{
+	float tick();
+	float getTimeSinceStart();
+	float getTimeSinceTick();
+
+	static u64 getRawTimestamp();
+	static u64 getFrequency();
+
+	u64 frequency;
+	u64 last_tick;
+	u64 first_tick;
+};
+
+enum class Keycode : u8 {
 	LBUTTON = 0x01,
 	RBUTTON = 0x02,
 	CANCEL = 0x03,
@@ -416,6 +407,7 @@ enum class Keycode : u8
 	A = 'A',
 	C = 'C',
 	D = 'D',
+	E = 'E',
 	K = 'K',
 	S = 'S',
 	V = 'V',
@@ -426,26 +418,7 @@ enum class Keycode : u8
 	INVALID = 0,
 	MAX = 0xff
 };
-	
 
-struct LUMIX_ENGINE_API Timer
-{
-	Timer();
-
-	float tick();
-	float getTimeSinceStart();
-	float getTimeSinceTick();
-
-	static u64 getRawTimestamp();
-	static u64 getFrequency();
-
-	u64 frequency;
-	u64 last_tick;
-	u64 first_tick;
-};
-
-
-} // namespace OS
-
+} // namespace os
 } // namespace Lumix
 

@@ -81,7 +81,7 @@ struct CullingSystemImpl final : CullingSystem
 	
 	Sphere* addToCell(CellPage& cell, EntityPtr entity, const DVec3& pos, float radius)
 	{
-		const Vec3 rel_pos = (pos - cell.header.origin).toFloat();
+		const Vec3 rel_pos = Vec3(pos - cell.header.origin);
 		const int count = cell.header.count;
 
 		if(count < CellPage::MAX_COUNT - 1) {
@@ -189,7 +189,7 @@ struct CullingSystemImpl final : CullingSystem
 		const IVec3 new_indices(pos * (1 / m_cell_size));
 
 		if(new_indices == cell.header.indices.pos) {
-			sphere->position = (pos - cell.header.origin).toFloat();
+			sphere->position = Vec3(pos - cell.header.origin);
 			return;
 		}
 
@@ -215,7 +215,7 @@ struct CullingSystemImpl final : CullingSystem
 
 		if (was_big == is_big && new_indices == cell.header.indices.pos) {
 			sphere->radius = radius;
-			sphere->position = (pos - cell.header.origin).toFloat();
+			sphere->position = Vec3(pos - cell.header.origin);
 			return;
 		}
 
@@ -265,14 +265,13 @@ struct CullingSystemImpl final : CullingSystem
 	LUMIX_FORCE_INLINE void doCulling(const CellPage& cell
 		, const Frustum& frustum
 		, CullResult* LUMIX_RESTRICT results
-		, PagedList<CullResult>& list)
+		, PagedList<CullResult>& list
+		, u8 type)
 	{
-		PROFILE_FUNCTION();
 		const Sphere* LUMIX_RESTRICT start = cell.spheres;
 		const Sphere* LUMIX_RESTRICT end = cell.spheres + cell.header.count;
 		const EntityPtr* LUMIX_RESTRICT sphere_to_entity_map = cell.entities;
 
-		Profiler::pushInt("objects", cell.header.count);
 		const float4 px = f4Load(frustum.xs);
 		const float4 py = f4Load(frustum.ys);
 		const float4 pz = f4Load(frustum.zs);
@@ -307,6 +306,7 @@ struct CullingSystemImpl final : CullingSystem
 			if(cursor == lengthOf(results->entities)) {
 				results->header.count = cursor;
 				results = list.push();
+				results->header.type = type;
 				cursor = 0;
 			}
 
@@ -316,8 +316,18 @@ struct CullingSystemImpl final : CullingSystem
 		results->header.count = cursor;
 	}
 
-
 	CullResult* cull(const ShiftedFrustum& frustum, u8 type) override
+	{
+		ASSERT(type != 0xff); // 0xff type is reserved for `all types`
+		return cullInternal(frustum, type);
+	}
+
+	CullResult* cull(const ShiftedFrustum& frustum) override
+	{
+		return cullInternal(frustum, 0xff);
+	}
+	
+	CullResult* cullInternal(const ShiftedFrustum& frustum, u8 type)
 	{
 		PROFILE_FUNCTION();
 		if (m_cells.empty()) return nullptr;
@@ -325,25 +335,34 @@ struct CullingSystemImpl final : CullingSystem
 		volatile i32 cell_idx = 0;
 		PagedList<CullResult> list(m_page_allocator);
 
-		JobSystem::runOnWorkers([&](){
+		jobs::runOnWorkers([&](){
 			PROFILE_BLOCK("cull_job");
 			const Vec3 v3_cell_size(m_cell_size);
 			const Vec3 v3_2_cell_size(2 * m_cell_size);
 			CullResult* result = nullptr;
+			u32 total_count = 0;
 			for(;;) {
 				const i32 idx = atomicIncrement(&cell_idx) - 1;
 				if (idx >= m_cells.size()) return;
 
 				CellPage& cell = *m_cells[idx];
-				if (cell.header.indices.type != type) continue;
-				if (!result) result = list.push();
+				if (type != 0xff && cell.header.indices.type != type) continue;
+				if (!result || result->header.type != cell.header.indices.type) {
+					result = list.push();
+					result->header.type = cell.header.indices.type;
+				}
 
-				if (frustum.containsAABB(cell.header.origin + v3_cell_size, v3_cell_size)) {
+				total_count += cell.header.count;
+				if (cell.header.indices.is_big) {
+					doCulling(cell, frustum.getRelative(cell.header.origin), result, list, cell.header.indices.type);
+				}
+				else if (frustum.containsAABB(cell.header.origin + v3_cell_size, v3_cell_size)) {
 					int to_cpy = cell.header.count;
 					int src_offset = 0;
 					while (to_cpy > 0) {
 						if(result->header.count == lengthOf(result->entities)) {
 							result = list.push();
+							result->header.type = cell.header.indices.type;
 						}
 						const int rem_space = lengthOf(result->entities) - result->header.count;
 						const int step = minimum(to_cpy, rem_space);
@@ -354,9 +373,10 @@ struct CullingSystemImpl final : CullingSystem
 					}
 				}
 				else if (frustum.intersectsAABB(cell.header.origin - v3_cell_size, v3_2_cell_size)) {
-					doCulling(cell, frustum.getRelative(cell.header.origin), result, list);
+					doCulling(cell, frustum.getRelative(cell.header.origin), result, list, cell.header.indices.type);
 				}
 			}
+			profiler::pushInt("count", total_count);
 		});
 
 		return list.detach();
@@ -390,14 +410,9 @@ void CullResult::free(PageAllocator& allocator)
 }
 
 
-CullingSystem* CullingSystem::create(IAllocator& allocator, PageAllocator& page_allocator)
+UniquePtr<CullingSystem> CullingSystem::create(IAllocator& allocator, PageAllocator& page_allocator)
 {
-	return LUMIX_NEW(allocator, CullingSystemImpl)(allocator, page_allocator);
+	return UniquePtr<CullingSystemImpl>::create(allocator, allocator, page_allocator);
 }
 
-
-void CullingSystem::destroy(CullingSystem& culling_system)
-{
-	LUMIX_DELETE(static_cast<CullingSystemImpl&>(culling_system).m_allocator, &culling_system);
-}
 }

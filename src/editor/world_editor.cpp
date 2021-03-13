@@ -1,5 +1,6 @@
 #include "world_editor.h"
 
+#include "editor/entity_folders.h"
 #include "editor/gizmo.h"
 #include "editor/prefab_system.h"
 #include "engine/array.h"
@@ -13,7 +14,6 @@
 #include "engine/geometry.h"
 #include "engine/plugin.h"
 #include "engine/log.h"
-#include "engine/lua_wrapper.h"
 #include "engine/math.h"
 #include "engine/metaprogramming.h"
 #include "engine/os.h"
@@ -23,6 +23,7 @@
 #include "engine/resource.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "engine/universe.h"
 #include "render_interface.h"
 
@@ -30,9 +31,8 @@
 namespace Lumix
 {
 
-
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType CAMERA_TYPE = Reflection::getComponentType("camera");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType CAMERA_TYPE = reflection::getComponentType("camera");
 
 static u32 ARGBToABGR(u32 color)
 {
@@ -44,8 +44,8 @@ void addCube(UniverseView& view, const DVec3& pos, const Vec3& right, const Vec3
 	const DVec3& cam_pos = view.getViewport().pos;
 
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -76,8 +76,8 @@ void addCube(UniverseView& view, const DVec3& min, const DVec3& max, Color color
 	const DVec3 cam_pos = view.getViewport().pos;
 
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -118,11 +118,46 @@ void addCube(UniverseView& view, const DVec3& min, const DVec3& max, Color color
 	add_line(a, b);
 }
 
+void addCylinder(UniverseView& view, const DVec3& pos, const Vec3& up, float radius, float height, Color color) {
+	Vec3 x_vec(0, up.z, -up.y);
+	if (squaredLength(x_vec) < 0.01) {
+		x_vec = Vec3(up.y, -up.x, 0);
+	}
+	x_vec = normalize(x_vec);
+	const Vec3 z_vec = normalize(cross(x_vec, up));
+
+	const DVec3 top = pos + up * height;
+	UniverseView::Vertex* vertices = view.render(true, 32 * 6);
+	const DVec3 cam_pos = view.getViewport().pos;
+
+	auto add_line = [&](const DVec3& a, const DVec3& b){
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
+		vertices[0].abgr = color.abgr();
+		vertices[1].abgr = color.abgr();
+		vertices += 2;
+	};
+
+	for (int i = 0; i < 32; ++i) {
+		const float a = i / 32.0f * 2 * PI;
+		const float x = cosf(a) * radius;
+		const float z = sinf(a) * radius;
+		add_line(pos + x_vec * x + z_vec * z, top + x_vec * x + z_vec * z);
+
+		const float a_next = (i + 1) / 32.0f * 2 * PI;
+		const float x_next = cosf(a_next) * radius;
+		const float z_next = sinf(a_next) * radius;
+
+		add_line(pos + x_vec * x + z_vec * z, pos + x_vec * x_next + z_vec * z_next);
+		add_line(top + x_vec * x + z_vec * z, top + x_vec * x_next + z_vec * z_next);
+	}
+}
+
 void addLine(UniverseView& view, const DVec3& a, const DVec3& b, Color color) {
 	UniverseView::Vertex* vertices = view.render(true, 2);
 	const DVec3 cam_pos = view.getViewport().pos;
-	vertices[0].pos = (a - cam_pos).toFloat();
-	vertices[1].pos = (b - cam_pos).toFloat();
+	vertices[0].pos = Vec3(a - cam_pos);
+	vertices[1].pos = Vec3(b - cam_pos);
 	vertices[0].abgr = color.abgr();
 	vertices[1].abgr = color.abgr();
 }
@@ -131,8 +166,8 @@ void addCone(UniverseView& view, const DVec3& vertex, const Vec3& dir, const Vec
 	UniverseView::Vertex* vertices = view.render(true, 32 * 4);
 	const DVec3 cam_pos = view.getViewport().pos;
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -165,8 +200,8 @@ void addHalfSphere(UniverseView& view, const DVec3& center, float radius, bool t
 	const DVec3 cam_pos = view.getViewport().pos;
 
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -215,16 +250,14 @@ void addCapsule(UniverseView& view, const DVec3& position, float height, float r
 
 	Vec3 z_vec(0, 0, 1.0f);
 	Vec3 x_vec(1.0f, 0, 0);
-	z_vec.normalize();
-	x_vec.normalize();
 	const DVec3 bottom = position + Vec3(0, radius, 0);
 	const DVec3 top = bottom + Vec3(0, height, 0);
 	UniverseView::Vertex* vertices = view.render(true, 32 * 2);
 	const DVec3 cam_pos = view.getViewport().pos;
 
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -245,8 +278,8 @@ void addFrustum(UniverseView& view, const struct ShiftedFrustum& frustum, Color 
 	const DVec3 cam_pos = view.getViewport().pos;
 
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -281,8 +314,8 @@ void addSphere(UniverseView& view, const DVec3& center, float radius, Color colo
 	UniverseView::Vertex* vertices = view.render(true, count * 6);
 	const DVec3& cam_pos = view.getViewport().pos;
 	auto add_line = [&](const DVec3& a, const DVec3& b){
-		vertices[0].pos = (a - cam_pos).toFloat();
-		vertices[1].pos = (b - cam_pos).toFloat();
+		vertices[0].pos = Vec3(a - cam_pos);
+		vertices[1].pos = Vec3(b - cam_pos);
 		vertices[0].abgr = color.abgr();
 		vertices[1].abgr = color.abgr();
 		vertices += 2;
@@ -309,52 +342,97 @@ void addSphere(UniverseView& view, const DVec3& center, float radius, Color colo
 	}
 }
 
-struct PropertyDeserializeVisitor : Reflection::IPropertyVisitor {
-	PropertyDeserializeVisitor(Ref<InputMemoryStream> deserializer
+template <typename T> void writeToStream(OutputMemoryStream& stream, T value) {	stream.write(value); }
+template <typename T> T readFromStream(InputMemoryStream& stream) { return stream.read<T>(); }
+template <> LUMIX_ENGINE_API Path readFromStream<Path>(InputMemoryStream& stream);
+template <> LUMIX_ENGINE_API void writeToStream<Path>(OutputMemoryStream& stream, Path);
+template <> LUMIX_ENGINE_API void writeToStream<const Path&>(OutputMemoryStream& stream, const Path& path);
+template <> LUMIX_ENGINE_API const char* readFromStream<const char*>(InputMemoryStream& stream);
+template <> LUMIX_ENGINE_API void writeToStream<const char*>(OutputMemoryStream& stream, const char* path);
+	
+template <> Path readFromStream<Path>(InputMemoryStream& stream)
+{
+	const char* c_str = (const char*)stream.getData() + stream.getPosition();
+	Path path(c_str);
+	stream.skip(stringLength(c_str) + 1);
+	return path;
+}
+
+
+template <> void writeToStream<const Path&>(OutputMemoryStream& stream, const Path& path)
+{
+	const char* str = path.c_str();
+	stream.write(str, stringLength(str) + 1);
+}
+
+
+template <> void writeToStream<Path>(OutputMemoryStream& stream, Path path)
+{
+	const char* str = path.c_str();
+	stream.write(str, stringLength(str) + 1);
+}
+
+
+template <> const char* readFromStream<const char*>(InputMemoryStream& stream)
+{
+	const char* c_str = (const char*)stream.getData() + stream.getPosition();
+	stream.skip(stringLength(c_str) + 1);
+	return c_str;
+}
+
+
+template <> void writeToStream<const char*>(OutputMemoryStream& stream, const char* value)
+{
+	stream.write(value, stringLength(value) + 1);
+}
+
+
+struct PropertyDeserializeVisitor : reflection::IPropertyVisitor {
+	PropertyDeserializeVisitor(InputMemoryStream& deserializer
 		, ComponentUID cmp
 		, const HashMap<EntityPtr, u32>& map
 		, Span<const EntityRef> entities)
-		: deserializer(deserializer.value) //-V1041
+		: deserializer(deserializer) //-V1041
 		, cmp(cmp)
 		, map(map)
 		, entities(entities)
 	{}
 
 	template <typename T>
-	void set(const Reflection::Property<T>& prop) {
-		prop.set(cmp, idx, Reflection::readFromStream<T>(deserializer));
+	void set(const reflection::Property<T>& prop) {
+		prop.set(cmp, idx, readFromStream<T>(deserializer));
 	}
 
-	void visit(const Reflection::Property<float>& prop) override { set(prop); }
-	void visit(const Reflection::Property<int>& prop) override { set(prop); }
-	void visit(const Reflection::Property<u32>& prop) override { set(prop); }
-	void visit(const Reflection::Property<Vec2>& prop) override { set(prop); }
-	void visit(const Reflection::Property<Vec3>& prop) override { set(prop); }
-	void visit(const Reflection::Property<IVec3>& prop) override { set(prop); }
-	void visit(const Reflection::Property<Vec4>& prop) override { set(prop); }
-	void visit(const Reflection::Property<bool>& prop) override { set(prop); }
-	void visit(const Reflection::IBlobProperty& prop) override { prop.setValue(cmp, idx, deserializer); }
-	void visit(const Reflection::Property<const char*>& prop) override { set(prop); }
-	void visit(const Reflection::Property<Path>& prop) override { set(prop); }
+	void visit(const reflection::Property<float>& prop) override { set(prop); }
+	void visit(const reflection::Property<int>& prop) override { set(prop); }
+	void visit(const reflection::Property<u32>& prop) override { set(prop); }
+	void visit(const reflection::Property<Vec2>& prop) override { set(prop); }
+	void visit(const reflection::Property<Vec3>& prop) override { set(prop); }
+	void visit(const reflection::Property<IVec3>& prop) override { set(prop); }
+	void visit(const reflection::Property<Vec4>& prop) override { set(prop); }
+	void visit(const reflection::Property<bool>& prop) override { set(prop); }
+	void visit(const reflection::Property<const char*>& prop) override { set(prop); }
+	void visit(const reflection::Property<Path>& prop) override { set(prop); }
+	void visit(const reflection::BlobProperty& prop) override { prop.setValue(cmp, idx, deserializer); }
 	
-	void visit(const Reflection::IDynamicProperties& prop) override {
+	void visit(const reflection::DynamicProperties& prop) override {
 		u32 c;
 		deserializer.read(c);
 		for (u32 i = 0; i < c; ++i) {
 			const char* name = deserializer.readString();
-			Reflection::IDynamicProperties::Type type;
+			reflection::DynamicProperties::Type type;
 			deserializer.read(type);
 			switch(type) {
-				case Reflection::IDynamicProperties::RESOURCE:	
-				case Reflection::IDynamicProperties::STRING: {
+				case reflection::DynamicProperties::RESOURCE:	
+				case reflection::DynamicProperties::STRING: {
 					const char* tmp = deserializer.readString();
-					Reflection::IDynamicProperties::Value v;
+					reflection::DynamicProperties::Value v;
 					v.s = tmp;
 					prop.set(cmp, idx, name, type, v);
 					break;
 				}
 				default: {
-					Reflection::IDynamicProperties::Value v;
+					reflection::DynamicProperties::Value v;
 					deserializer.read(v);
 					prop.set(cmp, idx, name, type, v);
 					break;
@@ -362,19 +440,19 @@ struct PropertyDeserializeVisitor : Reflection::IPropertyVisitor {
 			}
 		}
 	}
-
-	void visit(const Reflection::Property<EntityPtr>& prop) override { 
+	
+	void visit(const reflection::Property<EntityPtr>& prop) override { 
 		EntityPtr value;
-		deserializer.read(Ref(value));
+		deserializer.read(value);
 		auto iter = map.find(value);
 		if (iter.isValid()) value = entities[iter.value()];
 		
 		prop.set(cmp, idx, value);
 	}
 
-	void visit(const Reflection::IArrayProperty& prop) override {
-		int count;
-		deserializer.read(Ref(count));
+	void visit(const reflection::ArrayProperty& prop) override {
+		u32 count;
+		deserializer.read(count);
 		const int idx_backup = idx;
 		while (prop.getCount(cmp) > count) {
 			prop.removeItem(cmp, prop.getCount(cmp) - 1);
@@ -382,9 +460,9 @@ struct PropertyDeserializeVisitor : Reflection::IPropertyVisitor {
 		while (prop.getCount(cmp) < count) {
 			prop.addItem(cmp, -1);
 		}
-		for (int i = 0; i < count; ++i) {
+		for (u32 i = 0; i < count; ++i) {
 			idx = i;
-			prop.visit(*this);
+			prop.visitChildren(*this);
 		}
 		idx = idx_backup;
 	}
@@ -396,42 +474,42 @@ struct PropertyDeserializeVisitor : Reflection::IPropertyVisitor {
 	int idx;
 };
 
-struct PropertySerializeVisitor : Reflection::IPropertyVisitor {
-	PropertySerializeVisitor(Ref<OutputMemoryStream> serializer, ComponentUID cmp)
-		: serializer(serializer.value) //-V1041
+struct PropertySerializeVisitor : reflection::IPropertyVisitor {
+	PropertySerializeVisitor(OutputMemoryStream& serializer, ComponentUID cmp)
+		: serializer(serializer) //-V1041
 		, cmp(cmp)
 	{}
 
 	template <typename T>
-	void get(const Reflection::Property<T>& prop) {
-		Reflection::writeToStream(serializer, prop.get(cmp, idx));		
+	void get(const reflection::Property<T>& prop) {
+		writeToStream(serializer, prop.get(cmp, idx));		
 	}
 
-	void visit(const Reflection::Property<float>& prop) override { get(prop); }
-	void visit(const Reflection::Property<int>& prop) override { get(prop); }
-	void visit(const Reflection::Property<u32>& prop) override { get(prop); }
-	void visit(const Reflection::Property<EntityPtr>& prop) override { get(prop); }
-	void visit(const Reflection::Property<Vec2>& prop) override { get(prop); }
-	void visit(const Reflection::Property<Vec3>& prop) override { get(prop); }
-	void visit(const Reflection::Property<IVec3>& prop) override { get(prop); }
-	void visit(const Reflection::Property<Vec4>& prop) override { get(prop); }
-	void visit(const Reflection::Property<bool>& prop) override { get(prop); }
-	void visit(const Reflection::IBlobProperty& prop) override { prop.getValue(cmp, idx, serializer); }
-	void visit(const Reflection::Property<Path>& prop) override { get(prop); }
-	void visit(const Reflection::Property<const char*>& prop) override { get(prop); }
-
-	void visit(const Reflection::IDynamicProperties& prop) override {
+	void visit(const reflection::Property<float>& prop) override { get(prop); }
+	void visit(const reflection::Property<int>& prop) override { get(prop); }
+	void visit(const reflection::Property<u32>& prop) override { get(prop); }
+	void visit(const reflection::Property<EntityPtr>& prop) override { get(prop); }
+	void visit(const reflection::Property<Vec2>& prop) override { get(prop); }
+	void visit(const reflection::Property<Vec3>& prop) override { get(prop); }
+	void visit(const reflection::Property<IVec3>& prop) override { get(prop); }
+	void visit(const reflection::Property<Vec4>& prop) override { get(prop); }
+	void visit(const reflection::Property<bool>& prop) override { get(prop); }
+	void visit(const reflection::BlobProperty& prop) override { prop.getValue(cmp, idx, serializer); }
+	void visit(const reflection::Property<Path>& prop) override { get(prop); }
+	void visit(const reflection::Property<const char*>& prop) override { get(prop); }
+	
+	void visit(const reflection::DynamicProperties& prop) override {
 		const u32 c = prop.getCount(cmp, idx);
 		serializer.write(c);
 		for (u32 i = 0; i < c; ++i) {
 			const char* name = prop.getName(cmp, idx, i);
 			serializer.writeString(name);
-			const Reflection::IDynamicProperties::Type type = prop.getType(cmp, idx, i);
+			const reflection::DynamicProperties::Type type = prop.getType(cmp, idx, i);
 			serializer.write(type);
-			const Reflection::IDynamicProperties::Value v = prop.getValue(cmp, idx, i);
+			const reflection::DynamicProperties::Value v = prop.getValue(cmp, idx, i);
 			switch(type) {
-				case Reflection::IDynamicProperties::RESOURCE:	
-				case Reflection::IDynamicProperties::STRING: 
+				case reflection::DynamicProperties::RESOURCE:	
+				case reflection::DynamicProperties::STRING: 
 					serializer.writeString(v.s);
 					break;
 				default:
@@ -441,30 +519,30 @@ struct PropertySerializeVisitor : Reflection::IPropertyVisitor {
 		}
 	}
 
-	void visit(const Reflection::IArrayProperty& prop) override {
+	void visit(const reflection::ArrayProperty& prop) override {
 		const int count = prop.getCount(cmp);
 		serializer.write(count);
 		const int idx_backup = idx;
 		for (int i = 0; i < count; ++i) {
 			idx = i;
-			prop.visit(*this);
+			prop.visitChildren(*this);
 		}
 		idx = idx_backup;
 	}
 
 	OutputMemoryStream& serializer;
 	ComponentUID cmp;
-	int idx;
+	int idx = -1;
 };
 
 
-static void save(ComponentUID cmp, Ref<OutputMemoryStream> out) {
+static void save(ComponentUID cmp, OutputMemoryStream& out) {
 	PropertySerializeVisitor save(out, cmp);
 	save.idx = -1;
-	Reflection::getComponent(cmp.type)->visit(save);
+	reflection::getComponent(cmp.type)->visit(save);
 }
 
-static void load(ComponentUID cmp, Ref<InputMemoryStream> blob)
+static void load(ComponentUID cmp, InputMemoryStream& blob)
 {
 	struct : IAllocator {
 		void* allocate(size_t size) override { ASSERT(false); return nullptr; }
@@ -477,7 +555,7 @@ static void load(ComponentUID cmp, Ref<InputMemoryStream> blob)
 	} alloc;
 	HashMap<EntityPtr, u32> map(alloc);
 	PropertyDeserializeVisitor v(blob, cmp, map, Span<EntityRef>(nullptr, nullptr));
-	Reflection::getComponent(cmp.type)->visit(v);
+	reflection::getComponent(cmp.type)->visit(v);
 }
 
 
@@ -883,26 +961,26 @@ private:
 };
 
 
-struct GatherResourcesVisitor final : Reflection::IEmptyPropertyVisitor
+struct GatherResourcesVisitor final : reflection::IEmptyPropertyVisitor
 {
-	void visit(const Reflection::IArrayProperty& prop) override
+	void visit(const reflection::ArrayProperty& prop) override
 	{
 		int count = prop.getCount(cmp);
 		for (int i = 0; i < count; ++i) {
 			index = i;
-			prop.visit(*this);
+			prop.visitChildren(*this);
 		}
 		index = -1;
 	}
 
-	void visit(const Reflection::Property<Path>& prop) override
+	void visit(const reflection::Property<Path>& prop) override
 	{
-		auto* attr = Reflection::getAttribute(prop, Reflection::IAttribute::RESOURCE);
+		auto* attr = reflection::getAttribute(prop, reflection::IAttribute::RESOURCE);
 		if (!attr) return;
-		auto* resource_attr = (Reflection::ResourceAttribute*)attr;
+		auto* resource_attr = (reflection::ResourceAttribute*)attr;
 
 		Path path = prop.get(cmp, index);
-		Resource* resource = resource_manager->load(resource_attr->type, path);
+		Resource* resource = resource_manager->load(resource_attr->resource_type, path);
 		if(resource) resources->push(resource);
 	}
 
@@ -927,14 +1005,14 @@ public:
 		, m_property(property, editor.getAllocator())
 		, m_old_values(editor.getAllocator())
 	{
-		save(m_component, Ref(m_old_values));
+		save(m_component, m_old_values);
 	}
 
 
 	bool execute() override
 	{
-		struct : Reflection::IEmptyPropertyVisitor {
-			void visit(const Reflection::IArrayProperty& prop) override {
+		struct : reflection::IEmptyPropertyVisitor {
+			void visit(const reflection::ArrayProperty& prop) override {
 				if (!equalStrings(prop.name, propname)) return;
 				prop.removeItem(cmp, index);
 			}
@@ -945,7 +1023,7 @@ public:
 		v.propname = m_property.c_str();
 		v.cmp = m_component;
 		v.index = m_index;
-		Reflection::getComponent(m_component.type)->visit(v);
+		reflection::getComponent(m_component.type)->visit(v);
 		return true;
 	}
 
@@ -953,7 +1031,7 @@ public:
 	void undo() override
 	{
 		InputMemoryStream old_values(m_old_values);
-		load(m_component, Ref(old_values));
+		load(m_component, old_values);
 	}
 
 
@@ -990,36 +1068,28 @@ public:
 
 	bool execute() override
 	{
-		struct : Reflection::IEmptyPropertyVisitor {
-			void visit(const Reflection::IArrayProperty& prop) override {
-				if (!equalStrings(prop.name, prop_name)) return;
-				index = prop.getCount(cmp);
-				prop.addItem(cmp, index);
-			}
-			ComponentUID cmp;
-			int index;
-			const char* prop_name;
-		} v;
-		v.cmp = m_component;
-		v.prop_name = m_property;
-		Reflection::getComponent(m_component.type)->visit(v);
-		m_index = v.index;
+		reflection::ArrayProperty* prop = (reflection::ArrayProperty*)reflection::getProperty(m_component.type, m_property);
+		m_index = prop->getCount(m_component);
+		prop->addItem(m_component, m_index);
 		return true;
 	}
 
 
 	void undo() override
 	{
-		struct : Reflection::IEmptyPropertyVisitor {
-			void visit(const Reflection::IArrayProperty& prop) override {
+		struct : reflection::IEmptyPropertyVisitor {
+			void visit(const reflection::ArrayProperty& prop) override {
+				if (!equalStrings(prop.name, prop_name)) return;
 				prop.removeItem(cmp, index);
 			}
 			ComponentUID cmp;
 			int index;
+			const char* prop_name;
 		} v;
 		v.cmp = m_component;
 		v.index = m_index;
-		Reflection::getComponent(m_component.type)->visit(v);
+		v.prop_name = m_property;
+		reflection::getComponent(m_component.type)->visit(v);
 	}
 
 
@@ -1084,13 +1154,13 @@ public:
 		m_entities.reserve(entities.length());
 		Universe* universe = m_editor.getUniverse();
 
-		const Reflection::ComponentBase* cmp_desc = Reflection::getComponent(component_type);
+		const reflection::ComponentBase* cmp_desc = reflection::getComponent(component_type);
 
 		for (u32 i = 0; i < entities.length(); ++i) {
 			ComponentUID component = universe->getComponent(entities[i], component_type);
 			if (!component.isValid()) continue;
 
-			PropertySerializeVisitor v(Ref<OutputMemoryStream>(m_old_values), component);
+			PropertySerializeVisitor v(m_old_values, component);
 			v.idx = -1;
 			cmp_desc->visit(v);
 			m_entities.push(entities[i]);
@@ -1098,21 +1168,21 @@ public:
 	}
 
 
-	template <typename T2> static void set(Ref<Reflection::IDynamicProperties::Value> v, T2) { ASSERT(false); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, i32 val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, float val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, Path val) { Reflection::set(v.value, val.c_str()); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, const char* val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, EntityPtr val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, bool val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, Vec3 val) { Reflection::set(v.value, val); }
-	static void set(Ref<Reflection::IDynamicProperties::Value> v, const String& val) { Reflection::set(v.value, val.c_str()); }
+	template <typename T2> static void set(reflection::DynamicProperties::Value& v, T2) { ASSERT(false); }
+	static void set(reflection::DynamicProperties::Value& v, i32 val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, float val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, const Path& val) { reflection::set(v, val.c_str()); }
+	static void set(reflection::DynamicProperties::Value& v, const char* val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, EntityPtr val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, bool val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, Vec3 val) { reflection::set(v, val); }
+	static void set(reflection::DynamicProperties::Value& v, const String& val) { reflection::set(v, val.c_str()); }
 
 
 	bool execute() override
 	{
-		struct : Reflection::IEmptyPropertyVisitor {
-			void visit(const Reflection::Property<T>& prop) override { 
+		struct : reflection::IEmptyPropertyVisitor {
+			void visit(const reflection::Property<T>& prop) override { 
 				if (array[0] != '\0') return;
 				if (!equalIStrings(prop_name, prop.name)) return;
 				found = true;
@@ -1122,16 +1192,16 @@ public:
 				}
 			}
 
-			void visit(const Reflection::IArrayProperty& prop) override { 
+			void visit(const reflection::ArrayProperty& prop) override { 
 				if (!equalStrings(array, prop.name)) return;
 
 				const char* tmp = array;
 				array = "";
-				prop.visit(*this);
+				prop.visitChildren(*this);
 				array = tmp;
 			}
 
-			void visit(const Reflection::IDynamicProperties& prop) override { 
+			void visit(const reflection::DynamicProperties& prop) override { 
 				for (EntityPtr entity : cmd->m_entities) {
 					const ComponentUID cmp = cmd->m_editor.getUniverse()->getComponent((EntityRef)entity, cmd->m_component_type);
 					const u32 c = prop.getCount(cmp, cmd->m_index);
@@ -1139,12 +1209,13 @@ public:
 						const char* name = prop.getName(cmp, cmd->m_index, i);
 						if (!equalStrings(prop_name, name)) continue;
 						found = true;
-						Reflection::IDynamicProperties::Value v;
-						set(Ref(v), cmd->m_new_value);
+						reflection::DynamicProperties::Value v;
+						set(v, cmd->m_new_value);
 						prop.set(cmp, cmd->m_index, i, v);
 					}
 				}
 			}
+
 			SetPropertyCommand<T>* cmd;
 			const char* prop_name;
 			const char* array;
@@ -1153,7 +1224,7 @@ public:
 		v.cmd = this;
 		v.prop_name = m_property_name.c_str();
 		v.array = m_array.c_str();
-		Reflection::getComponent(m_component_type)->visit(v);
+		reflection::getComponent(m_component_type)->visit(v);
 		return v.found;
 	}
 
@@ -1161,13 +1232,13 @@ public:
 	void undo() override
 	{
 		InputMemoryStream blob(m_old_values);
-		const Reflection::ComponentBase* cmp_desc = Reflection::getComponent(m_component_type);
+		const reflection::ComponentBase* cmp_desc = reflection::getComponent(m_component_type);
 		HashMap<EntityPtr, u32> map(m_editor.getAllocator());
 		Universe* universe = m_editor.getUniverse();
 		Span<const EntityRef> entities(nullptr, nullptr);
 		for (int i = 0; i < m_entities.size(); ++i) {
 			const ComponentUID cmp = universe->getComponent(m_entities[i], m_component_type);
-			PropertyDeserializeVisitor v(Ref<InputMemoryStream>(blob), cmp, map, entities);	
+			PropertyDeserializeVisitor v(blob, cmp, map, entities);	
 			cmp_desc->visit(v);
 		}
 	}
@@ -1214,6 +1285,129 @@ struct WorldEditorImpl final : WorldEditor
 {
 	friend struct PasteEntityCommand;
 private:
+	struct DestroyEntityFolderCommand final : IEditorCommand {
+		DestroyEntityFolderCommand(WorldEditorImpl& editor, u16 folder)
+			: m_editor(editor)
+			, m_folder(folder)
+			, m_folder_name(editor.getAllocator())
+		{
+			EntityFolders::Folder& f = editor.m_entity_folders->getFolder(folder);
+			m_parent = f.parent_folder;
+			m_folder_name = f.name;
+		}
+
+		bool execute() override {
+			m_editor.m_entity_folders->destroyFolder(m_folder);
+			return true;
+		}
+
+		void undo() override {
+			m_editor.m_entity_folders->emplaceFolder(m_folder, m_parent);
+			EntityFolders::Folder& f = m_editor.m_entity_folders->getFolder(m_folder);
+			copyString(f.name, m_folder_name.c_str());
+		}
+
+		const char* getType() override { return "destroy_entity_folder"; }
+		bool merge(IEditorCommand& command) override { return false; }
+
+		WorldEditorImpl& m_editor;
+		u16 m_parent;
+		u16 m_folder;
+		String m_folder_name;
+	};
+
+	struct CreateEntityFolderCommand final : IEditorCommand {
+		CreateEntityFolderCommand(WorldEditorImpl& editor, EntityFolders::FolderID parent, EntityFolders::FolderID* out)
+			: m_editor(editor)
+			, m_parent(parent)
+			, m_folder(0xffFF)
+			, m_out(out)
+		{}
+
+		bool execute() override {
+			m_folder = m_editor.m_entity_folders->emplaceFolder(m_folder, m_parent);
+			if (m_out) *m_out = m_folder;
+			m_out = nullptr;
+			return true;
+		}
+
+		void undo() override {
+			m_editor.m_entity_folders->destroyFolder(m_folder);
+		}
+
+		const char* getType() override { return "create_entity_folder"; }
+		bool merge(IEditorCommand& command) override { return false; }
+	
+		WorldEditorImpl& m_editor;
+		EntityFolders::FolderID m_parent;
+		EntityFolders::FolderID m_folder;
+		EntityFolders::FolderID* m_out;
+	};
+
+	struct RenameEntityFolderCommand final : IEditorCommand {
+		RenameEntityFolderCommand(WorldEditorImpl& editor, u16 folder, const char* new_name)
+			: m_editor(editor)
+			, m_folder(folder)
+			, m_new_name(new_name, editor.getAllocator())
+			, m_old_name(editor.getAllocator())
+		{
+			m_old_name = m_editor.m_entity_folders->getFolder(m_folder).name;
+		}
+
+		bool execute() override {
+			EntityFolders::Folder& f = m_editor.m_entity_folders->getFolder(m_folder);
+			copyString(f.name, m_new_name.c_str());
+			return true;
+		}
+
+		void undo() override {
+			EntityFolders::Folder& f = m_editor.m_entity_folders->getFolder(m_folder);
+			copyString(f.name, m_old_name.c_str());
+		}
+
+		const char* getType() override { return "rename_entity_folder"; }
+		bool merge(IEditorCommand& command) override { 
+			RenameEntityFolderCommand& cmd = (RenameEntityFolderCommand&)command;
+			if (cmd.m_folder != m_folder) return false;
+			cmd.m_new_name = m_new_name;
+			return true;
+		}
+	
+		WorldEditorImpl& m_editor;
+		u16 m_folder;
+		String m_new_name;
+		String m_old_name;
+	};
+	
+	struct MoveEntityToFolderCommand final : IEditorCommand {
+		MoveEntityToFolderCommand(WorldEditorImpl& editor, EntityRef entity, u16 folder)
+			: m_editor(editor)
+			, m_new_folder(folder)
+			, m_entity(entity)
+		{
+			m_old_folder = editor.m_entity_folders->getFolder(entity);
+		}
+
+		bool execute() override {
+			m_editor.m_entity_folders->moveToFolder(m_entity, m_new_folder);
+			return true;
+		}
+
+		void undo() override {
+			m_editor.m_entity_folders->moveToFolder(m_entity, m_old_folder);
+		}
+
+		const char* getType() override { return "move_entity_to_folder"; }
+
+		bool merge(IEditorCommand& command) override { return false; }
+	
+		WorldEditorImpl& m_editor;
+		EntityFolders::FolderID m_new_folder;
+		EntityFolders::FolderID m_old_folder;
+		EntityRef m_entity;
+	};
+
+
 	struct AddComponentCommand final : IEditorCommand
 	{
 		AddComponentCommand(WorldEditorImpl& editor,
@@ -1251,7 +1445,7 @@ private:
 					ret = true;
 				}
 				else {
-					logError("Editor") << "Failed to create component on entity " << e.index;
+					logError("Failed to create component on entity ", e.index);
 				}
 			}
 			return ret;
@@ -1287,10 +1481,12 @@ private:
 
 
 		MakeParentCommand(WorldEditorImpl& editor, EntityPtr parent, EntityRef child)
-			: m_editor(static_cast<WorldEditorImpl&>(editor))
+			: m_editor(editor)
 			, m_parent(parent)
 			, m_child(child)
 		{
+			m_old_folder = editor.m_entity_folders->getFolder(child);
+			m_old_parent = m_editor.getUniverse()->getParent(m_child);
 		}
 
 
@@ -1308,10 +1504,10 @@ private:
 
 		bool execute() override
 		{
-			if(m_child.isValid()) {
-				const EntityRef e = (EntityRef)m_child;
-				m_old_parent = m_editor.getUniverse()->getParent(e);
-				m_editor.getUniverse()->setParent(m_parent, e);
+			m_editor.getUniverse()->setParent(m_parent, m_child);
+			if (m_parent.isValid()) {
+				EntityFolders::FolderID f = m_editor.m_entity_folders->getFolder((EntityRef)m_parent);
+				m_editor.m_entity_folders->moveToFolder(m_child, f);
 			}
 			return true;
 		}
@@ -1319,16 +1515,16 @@ private:
 
 		void undo() override
 		{
-			if(m_child.isValid()) {
-				m_editor.getUniverse()->setParent(m_old_parent, (EntityRef)m_child);
-			}
+			m_editor.getUniverse()->setParent(m_old_parent, m_child);
+			m_editor.m_entity_folders->moveToFolder(m_child, m_old_folder);
 		}
 
 	private:
-		WorldEditor& m_editor;
+		WorldEditorImpl& m_editor;
+		EntityFolders::FolderID m_old_folder;
 		EntityPtr m_parent;
 		EntityPtr m_old_parent;
-		EntityPtr m_child;
+		EntityRef m_child;
 	};
 
 
@@ -1358,7 +1554,9 @@ private:
 				m_entities.push(entities[i]);
 				pushChildren(entities[i]);
 			}
-			m_entities.removeDuplicates();
+			if (!m_entities.empty()) {
+				fastRemoveDuplicates(m_entities);
+			}
 			m_transformations.reserve(m_entities.size());
 		}
 
@@ -1367,7 +1565,7 @@ private:
 		{
 			for (Resource* resource : m_resources)
 			{
-				resource->getResourceManager().unload(*resource);
+				resource->decRefCount();
 			}
 		}
 
@@ -1401,6 +1599,8 @@ private:
 				}
 				m_old_values.writeString(universe->getEntityName(m_entities[i]));
 				EntityPtr parent = universe->getParent(m_entities[i]);
+				const EntityFolders::FolderID folder = m_editor.m_entity_folders->getFolder(m_entities[i]);
+				m_old_values.write(folder);
 				m_old_values.write(parent);
 				if (parent.isValid())
 				{
@@ -1421,7 +1621,7 @@ private:
 					cmp = universe->getNextComponent(cmp))
 				{
 					m_old_values.write(cmp.type);
-					const Reflection::ComponentBase* cmp_desc = Reflection::getComponent(cmp.type);
+					const reflection::ComponentBase* cmp_desc = reflection::getComponent(cmp.type);
 
 					GatherResourcesVisitor gather;
 					gather.cmp = cmp;
@@ -1430,7 +1630,7 @@ private:
 					gather.resource_manager = &resource_manager;
 					cmp_desc->visit(gather);
 
-					Lumix::save(cmp, Ref(m_old_values));
+					Lumix::save(cmp, m_old_values);
 				}
 				const PrefabHandle prefab = m_editor.getPrefabSystem().getPrefab(m_entities[i]);
 				m_old_values.write(prefab);
@@ -1462,6 +1662,9 @@ private:
 				const char* name = blob.readString();
 				universe->setEntityName(new_entity, name);
 				EntityPtr parent;
+				EntityFolders::FolderID folder;
+				blob.read(folder);
+				m_editor.m_entity_folders->moveToFolder(new_entity, folder);
 				blob.read(parent);
 				if (parent.isValid())
 				{
@@ -1492,7 +1695,7 @@ private:
 					new_component.scene = scene;
 					new_component.type = cmp_type;
 					
-					::Lumix::load(new_component, Ref(blob));
+					::Lumix::load(new_component, blob);
 				}
 				PrefabHandle tpl;
 				blob.read(tpl);
@@ -1545,7 +1748,7 @@ private:
 		~DestroyComponentCommand()
 		{
 			for (Resource* resource : m_resources) {
-				resource->getResourceManager().unload(*resource);
+				resource->decRefCount();
 			}
 		}
 
@@ -1562,7 +1765,7 @@ private:
 			{
 				cmp.entity = entity;
 				universe->createComponent(cmp.type, entity);
-				::Lumix::load(cmp, Ref(blob));
+				::Lumix::load(cmp, blob);
 			}
 		}
 
@@ -1576,7 +1779,7 @@ private:
 		bool execute() override
 		{
 			ASSERT(!m_entities.empty());
-			const Reflection::ComponentBase* cmp_desc = Reflection::getComponent(m_cmp_type);
+			const reflection::ComponentBase* cmp_desc = reflection::getComponent(m_cmp_type);
 			ComponentUID cmp;
 			cmp.type = m_cmp_type;
 			cmp.scene = m_editor.getUniverse()->getScene(m_cmp_type);
@@ -1586,7 +1789,7 @@ private:
 
 			for (EntityRef entity : m_entities) {
 				cmp.entity = entity;
-				Lumix::save(cmp, Ref(m_old_values));
+				Lumix::save(cmp, m_old_values);
 
 				GatherResourcesVisitor gather;
 				gather.cmp = cmp;
@@ -1611,9 +1814,10 @@ private:
 
 	struct AddEntityCommand final : IEditorCommand
 	{
-		AddEntityCommand(WorldEditorImpl& editor, const DVec3& position)
+		AddEntityCommand(WorldEditorImpl& editor, const DVec3& position, EntityRef* output)
 			: m_editor(editor)
 			, m_position(position)
+			, m_output(output)
 		{
 			m_entity = INVALID_ENTITY;
 		}
@@ -1630,6 +1834,9 @@ private:
 			}
 			const EntityRef e = (EntityRef)m_entity;
 			m_editor.selectEntities(Span(&e, 1), false);
+			if (m_output) {
+				*m_output = e;
+			}
 			return true;
 		}
 
@@ -1645,13 +1852,13 @@ private:
 
 		bool merge(IEditorCommand&) override { return false; }
 		const char* getType() override { return "add_entity"; }
-		EntityPtr getEntity() const { return m_entity; }
 
 
 	private:
 		WorldEditorImpl& m_editor;
 		EntityPtr m_entity;
 		DVec3 m_position;
+		EntityRef* m_output;
 	};
 
 public:
@@ -1674,15 +1881,6 @@ public:
 		PROFILE_FUNCTION();
 
 		Gizmo::frame();
-		// TODO do not allow user interaction (e.g. saving universe) while queue is not empty
-		while (!m_command_queue.empty()) {
-			if (!m_command_queue[0]->isReady()) break;
-
-			IEditorCommand* cmd = m_command_queue[0];
-			m_command_queue.erase(0);
-			doExecute(cmd);
-		}
-
 		m_prefab_system->update();
 	}
 
@@ -1691,7 +1889,7 @@ public:
 	{
 		destroyUniverse();
 
-		PrefabSystem::destroy(m_prefab_system);
+		m_prefab_system.reset();
 	}
 
 
@@ -1711,18 +1909,15 @@ public:
 			for(auto e : m_selected_entities)
 			{
 				const DVec3 pos = m_universe->getPosition(e);
-				Vec3 dir = (pos - hit_pos).toFloat();
-				dir.normalize();
+				Vec3 dir = normalize(Vec3(pos - hit_pos));
 				Matrix mtx = Matrix::IDENTITY;
 				Vec3 y(0, 1, 0);
-				if(dotProduct(y, dir) > 0.99f)
+				if(dot(y, dir) > 0.99f)
 				{
-					y.set(1, 0, 0);
+					y = Vec3(1, 0, 0);
 				}
-				Vec3 x = crossProduct(y, dir);
-				x.normalize();
-				y = crossProduct(dir, x);
-				y.normalize();
+				Vec3 x = normalize(cross(y, dir));
+				y = normalize(cross(dir, x));
 				mtx.setXVector(x);
 				mtx.setYVector(y);
 				mtx.setZVector(dir);
@@ -1731,13 +1926,14 @@ public:
 				rotations.emplace(mtx.getRotation());
 			}
 		}
-		MoveEntityCommand* cmd = LUMIX_NEW(m_allocator, MoveEntityCommand)(*this,
+		UniquePtr<MoveEntityCommand> cmd = UniquePtr<MoveEntityCommand>::create(m_allocator, 
+			*this,
 			&m_selected_entities[0],
 			&positions[0],
 			&rotations[0],
 			positions.size(),
 			m_allocator);
-		executeCommand(cmd);
+		executeCommand(cmd.move());
 	}
 
 
@@ -1747,20 +1943,24 @@ public:
 	{
 		saveProject();
 
-		logInfo("Editor") << "Saving universe " << basename << "...";
+		logInfo("Saving universe ", basename, "...");
 		
-		StaticString<MAX_PATH_LENGTH> dir(m_engine.getFileSystem().getBasePath(), "universes/", basename);
-		OS::makePath(dir);
-		StaticString<MAX_PATH_LENGTH> path(dir, "/entities.unv");
-		StaticString<MAX_PATH_LENGTH> bkp_path(dir, "/entities.unv.bak");
-		if (OS::fileExists(path)) OS::copyFile(path, bkp_path);
-		OS::OutputFile file;
+		StaticString<LUMIX_MAX_PATH> path(m_engine.getFileSystem().getBasePath(), "universes");
+		if (!os::makePath(path)) logError("Could not create directory universes/");
+		path << "/" << basename << ".unv";
+		StaticString<LUMIX_MAX_PATH> bkp_path(path, ".bak");
+		if (os::fileExists(path)) {
+			if (!os::copyFile(path, bkp_path)) {
+				logError("Could not copy ", path, " to ", bkp_path);
+			}
+		}
+		os::OutputFile file;
 		if (file.open(path)) {
 			save(file);
 			file.close();
 		}
 		else {
-			logError("Editor") << "Failed to save universe " << basename;
+			logError("Failed to save universe ", basename);
 		}
 		
 		m_is_universe_changed = false;
@@ -1784,6 +1984,7 @@ public:
 
 		header.engine_hash = m_engine.serialize(*m_universe, blob);
 		m_prefab_system->serialize(blob);
+		m_entity_folders->serialize(blob);
 		const Viewport& vp = getView().getViewport();
 		blob.write(vp.pos);
 		blob.write(vp.rot);
@@ -1791,21 +1992,21 @@ public:
 		memcpy(blob.getMutableData(), &header, sizeof(header));
 		file.write(blob.data(), blob.size());
 
-		logInfo("editor") << "Universe saved";
+		logInfo("Universe saved");
 	}
 
 
 	void makeParent(EntityPtr parent, EntityRef child) override
 	{
-		MakeParentCommand* command = LUMIX_NEW(m_allocator, MakeParentCommand)(*this, parent, child);
-		executeCommand(command);
+		UniquePtr<MakeParentCommand> command = UniquePtr<MakeParentCommand>::create(m_allocator, *this, parent, child);
+		executeCommand(command.move());
 	}
 
 
 	void destroyEntities(const EntityRef* entities, int count) override
 	{
-		DestroyEntitiesCommand* command = LUMIX_NEW(m_allocator, DestroyEntitiesCommand)(*this, entities, count);
-		executeCommand(command);
+		UniquePtr<DestroyEntitiesCommand> command = UniquePtr<DestroyEntitiesCommand>::create(m_allocator, *this, entities, count);
+		executeCommand(command.move());
 	}
 
 
@@ -1822,19 +2023,21 @@ public:
 
 		const UniverseView::RayHit hit = m_view->getCameraRaycastHit(camera_x, camera_y);
 
-		AddEntityCommand* command = LUMIX_NEW(m_allocator, AddEntityCommand)(*this, hit.pos);
-		executeCommand(command);
+		EntityRef res;
+		UniquePtr<AddEntityCommand> command = UniquePtr<AddEntityCommand>::create(m_allocator, *this, hit.pos, &res);
+		executeCommand(command.move());
 
-		return (EntityRef)command->getEntity();
+		return res;
 	}
 
 
 	EntityRef addEntityAt(const DVec3& pos) override
 	{
-		AddEntityCommand* command = LUMIX_NEW(m_allocator, AddEntityCommand)(*this, pos);
-		executeCommand(command);
+		EntityRef res;
+		UniquePtr<AddEntityCommand> command = UniquePtr<AddEntityCommand>::create(m_allocator, *this, pos, &res);
+		executeCommand(command.move());
 
-		return (EntityRef)command->getEntity();
+		return res;
 	}
 
 
@@ -1842,9 +2045,9 @@ public:
 	{
 		if (count <= 0) return;
 
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, ScaleEntityCommand)(*this, entities, scales, count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<ScaleEntityCommand>::create(m_allocator, *this, entities, scales, count, m_allocator);
+		executeCommand(command.move());
 	}
 
 
@@ -1852,9 +2055,9 @@ public:
 	{
 		if (count <= 0) return;
 
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, ScaleEntityCommand)(*this, entities, count, scale, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<ScaleEntityCommand>::create(m_allocator, *this, entities, count, scale, m_allocator);
+		executeCommand(command.move());
 	}
 
 
@@ -1869,9 +2072,9 @@ public:
 		{
 			positions.push(universe->getPosition(entities[i]));
 		}
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, MoveEntityCommand)(*this, entities, &positions[0], rotations, count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<MoveEntityCommand>::create(m_allocator, *this, entities, &positions[0], rotations, count, m_allocator);
+		executeCommand(command.move());
 	}
 
 
@@ -1891,8 +2094,8 @@ public:
 			poss.push(universe->getPosition(entities[i]));
 			(&poss[i].x)[(int)coord] = value;
 		}
-		IEditorCommand* command = LUMIX_NEW(m_allocator, MoveEntityCommand)(*this, entities, &poss[0], &rots[0], count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command = UniquePtr<MoveEntityCommand>::create(m_allocator, *this, entities, &poss[0], &rots[0], count, m_allocator);
+		executeCommand(command.move());
 	}
 
 
@@ -1909,9 +2112,9 @@ public:
 			poss.push(universe->getLocalTransform(entities[i]).pos);
 			(&poss[i].x)[(int)coord] = value;
 		}
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, LocalMoveEntityCommand)(*this, entities, &poss[0], count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<LocalMoveEntityCommand>::create(m_allocator, *this, entities, &poss[0], count, m_allocator);
+		executeCommand(command.move());
 	}
 
 
@@ -1926,9 +2129,9 @@ public:
 		{
 			rots.push(universe->getRotation(entities[i]));
 		}
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, MoveEntityCommand)(*this, entities, positions, &rots[0], count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<MoveEntityCommand>::create(m_allocator, *this, entities, positions, &rots[0], count, m_allocator);
+		executeCommand(command.move());
 	}
 
 	void setEntitiesPositionsAndRotations(const EntityRef* entities,
@@ -1937,26 +2140,27 @@ public:
 		int count) override
 	{
 		if (count <= 0) return;
-		IEditorCommand* command =
-			LUMIX_NEW(m_allocator, MoveEntityCommand)(*this, entities, positions, rotations, count, m_allocator);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command =
+			UniquePtr<MoveEntityCommand>::create(m_allocator, *this, entities, positions, rotations, count, m_allocator);
+		executeCommand(command.move());
 	}
 
 
 	void setEntityName(EntityRef entity, const char* name) override
 	{
-		IEditorCommand* command = LUMIX_NEW(m_allocator, SetEntityNameCommand)(*this, entity, name);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command = UniquePtr<SetEntityNameCommand>::create(m_allocator, *this, entity, name);
+		executeCommand(command.move());
 	}
 
 
-	void beginCommandGroup(u32 type) override
+	void beginCommandGroup(const char* type_str) override
 	{
-		if(m_undo_index < m_undo_stack.size() - 1)
+		const u32 type = crc32(type_str);
+		while (m_undo_index < m_undo_stack.size() - 1)
 		{
 			for(int i = m_undo_stack.size() - 1; i > m_undo_index; --i)
 			{
-				LUMIX_DELETE(m_allocator, m_undo_stack[i]);
+				m_undo_stack[i].reset();
 			}
 			m_undo_stack.resize(m_undo_index + 1);
 		}
@@ -1966,9 +2170,9 @@ public:
 			static const u32 end_group_hash = crc32("end_group");
 			if(crc32(m_undo_stack[m_undo_index]->getType()) == end_group_hash)
 			{
-				if(static_cast<EndGroupCommand*>(m_undo_stack[m_undo_index])->group_type == type)
+				if(static_cast<EndGroupCommand*>(m_undo_stack[m_undo_index].get())->group_type == type)
 				{
-					LUMIX_DELETE(m_allocator, m_undo_stack[m_undo_index]);
+					m_undo_stack[m_undo_index].reset();
 					--m_undo_index;
 					m_undo_stack.pop();
 					return;
@@ -1977,8 +2181,8 @@ public:
 		}
 
 		m_current_group_type = type;
-		auto* cmd = LUMIX_NEW(m_allocator, BeginGroupCommand);
-		m_undo_stack.push(cmd);
+		UniquePtr<BeginGroupCommand> cmd = UniquePtr<BeginGroupCommand>::create(m_allocator);
+		m_undo_stack.push(cmd.move());
 		++m_undo_index;
 	}
 
@@ -1989,102 +2193,49 @@ public:
 		{
 			for (int i = m_undo_stack.size() - 1; i > m_undo_index; --i)
 			{
-				LUMIX_DELETE(m_allocator, m_undo_stack[i]);
+				m_undo_stack[i].reset();
 			}
 			m_undo_stack.resize(m_undo_index + 1);
 		}
 
-		auto* cmd = LUMIX_NEW(m_allocator, EndGroupCommand);
+		UniquePtr<EndGroupCommand> cmd = UniquePtr<EndGroupCommand>::create(m_allocator);
 		cmd->group_type = m_current_group_type;
-		m_undo_stack.push(cmd);
+		m_undo_stack.push(cmd.move());
 		++m_undo_index;
 	}
 
-	void registerCommand(const char* name, CommandCreator* creator) override {
-		lua_State* L = m_engine.getState();
-		LuaWrapper::DebugGuard guard(L);
-		lua_getfield(L, LUA_GLOBALSINDEX, "Editor");
-		if (!lua_istable(L, -1)) {
-			lua_pop(L, 1);
-			lua_newtable(L);
-			lua_pushvalue(L, -1);
-			lua_setfield(L, LUA_GLOBALSINDEX, "Editor");
-		}
-
-		lua_getfield(L, -1, name);
-		if (!lua_isnil(L, -1)) {
-			lua_pop(L, 1);
-			logError("Editor") << "Command " << name << " already exists.";
-			return;
-		}
-		lua_pop(L, 1);
-
-		auto f = [](lua_State* L) -> int {
-			auto* creator = LuaWrapper::toType<CommandCreator*>(L, lua_upvalueindex(1));
-			auto* editor = LuaWrapper::toType<WorldEditor*>(L, lua_upvalueindex(2));
-			IEditorCommand* cmd = creator(L, *editor);
-			editor->executeCommand(cmd);
-			return 0;
-		};
-
-		lua_pushlightuserdata(L, reinterpret_cast<void*>(creator));
-		lua_pushlightuserdata(L, this);
-		lua_pushcclosure(L, f, 2);
-		lua_setfield(L, -2, name);
-		lua_pop(L, 1);
-	}
-
-	void executeCommand(const char* name, const char* args) override {
-		lua_State* L = m_engine.getState();
-		StaticString<1024> tmp("Editor.", name, "(", args, ")");
-		LuaWrapper::execute(L, Span(tmp.data, stringLength(tmp.data)), "executeCommand", 0);
-	}
-
-	void executeCommand(IEditorCommand* command) override
+	void executeCommand(UniquePtr<IEditorCommand>&& command) override
 	{
-		if (!m_command_queue.empty() || !command->isReady()) {
-			m_command_queue.push(command);
-			return;
-		}
-
-		doExecute(command);
+		doExecute(command.move());
 	}
 
 
-	void doExecute(IEditorCommand* command)
+	void doExecute(UniquePtr<IEditorCommand>&& command)
 	{
-		ASSERT(command->isReady());
-		
 		m_is_universe_changed = true;
 		if (m_undo_index >= 0 && command->getType() == m_undo_stack[m_undo_index]->getType())
 		{
 			if (command->merge(*m_undo_stack[m_undo_index]))
 			{
 				m_undo_stack[m_undo_index]->execute();
-				LUMIX_DELETE(m_allocator, command);
 				return;
 			}
 		}
 
 		if (command->execute())
 		{
-			if (m_undo_index < m_undo_stack.size() - 1)
-			{
-				for (int i = m_undo_stack.size() - 1; i > m_undo_index; --i)
-				{
-					LUMIX_DELETE(m_allocator, m_undo_stack[i]);
-				}
+			if (m_undo_index < m_undo_stack.size() - 1) {
 				m_undo_stack.resize(m_undo_index + 1);
 			}
-			m_undo_stack.push(command);
+			m_undo_stack.emplace(command.move());
 			if (m_is_game_mode) ++m_game_mode_commands;
 			++m_undo_index;
 			return;
 		}
 		else {
-			logError("Editor") << "Editor command failed";
+			logError("Editor command failed");
 		}
-		LUMIX_DELETE(m_allocator, command);	
+		command.reset();
 	}
 
 
@@ -2103,7 +2254,7 @@ public:
 		m_game_mode_file.clear();
 		save(m_game_mode_file);
 		m_is_game_mode = true;
-		beginCommandGroup(0);
+		beginCommandGroup("");
 		endCommandGroup();
 		m_game_mode_commands = 2;
 		m_engine.startGame(*m_universe);
@@ -2114,7 +2265,6 @@ public:
 	{
 		for (int i = 0; i < m_game_mode_commands; ++i)
 		{
-			LUMIX_DELETE(m_allocator, m_undo_stack.back());
 			m_undo_stack.pop();
 			--m_undo_index;
 		}
@@ -2129,9 +2279,11 @@ public:
 			m_universe_destroyed.invoke();
 			m_prefab_system->setUniverse(nullptr);
 			StaticString<64> name(m_universe->getName());
+			m_entity_folders.destroy();
 			m_engine.destroyUniverse(*m_universe);
 			
 			m_universe = &m_engine.createUniverse(true);
+			m_entity_folders.create(*m_universe, m_allocator);
 			m_prefab_system->setUniverse(m_universe);
 			m_universe_created.invoke();
 			m_universe->setName(name);
@@ -2147,7 +2299,47 @@ public:
 		}
 		m_engine.getResourceManager().enableUnload(true);
 	}
+	
+	void moveEntityToFolder(EntityRef entity, u16 folder) override {
+		UniquePtr<IEditorCommand> command = UniquePtr<MoveEntityToFolderCommand>::create(m_allocator, *this, entity, folder);
+		executeCommand(command.move());
+	}
 
+	void renameEntityFolder(u16 folder, const char* new_name) override {
+		UniquePtr<IEditorCommand> command = UniquePtr<RenameEntityFolderCommand>::create(m_allocator, *this, folder, new_name);
+		executeCommand(command.move());
+	}
+	
+	u16 createEntityFolder(u16 parent) override {
+		EntityFolders::FolderID res;
+		UniquePtr<IEditorCommand> command = UniquePtr<CreateEntityFolderCommand>::create(m_allocator, *this, parent, &res);
+		executeCommand(command.move());
+		return res;
+	}
+
+	void destroyEntityFolder(u16 folder) override {
+		const EntityFolders::Folder& f = m_entity_folders->getFolder(folder);
+
+		beginCommandGroup("destroy_entity_folder");
+		Array<EntityRef> entities(m_allocator);
+
+		EntityPtr iter = f.first_entity;
+		while(iter.isValid()) {
+			entities.push((EntityRef)iter);
+			iter = m_entity_folders->getNextEntity((EntityRef)iter);
+		}
+
+		if (!entities.empty()) destroyEntities(entities.begin(), (i32)entities.size());
+
+		UniquePtr<IEditorCommand> command = UniquePtr<DestroyEntityFolderCommand>::create(m_allocator, *this, folder);
+		executeCommand(command.move());
+
+		endCommandGroup();
+	}
+
+	EntityFolders& getEntityFolders() override {
+		return *m_entity_folders.get();
+	}
 
 	PrefabSystem& getPrefabSystem() override
 	{
@@ -2172,11 +2364,11 @@ public:
 				cmp.isValid();
 				cmp = m_universe->getNextComponent(cmp))
 			{
-				const u32 cmp_type = Reflection::getComponentTypeHash(cmp.type);
+				const u32 cmp_type = crc32(reflection::getComponent(cmp.type)->name);
 				serializer.write(cmp_type);
-				const Reflection::ComponentBase* cmp_desc = Reflection::getComponent(cmp.type);
+				const reflection::ComponentBase* cmp_desc = reflection::getComponent(cmp.type);
 				
-				PropertySerializeVisitor visitor(Ref<OutputMemoryStream>(serializer), cmp);
+				PropertySerializeVisitor visitor(serializer, cmp);
 				visitor.idx = -1;
 				cmp_desc->visit(visitor);
 			}
@@ -2184,14 +2376,14 @@ public:
 		}
 	}
 
-	void gatherHierarchy(EntityRef e, Ref<Array<EntityRef>> entities) {
-		entities->push(e);
+	void gatherHierarchy(EntityRef e, Array<EntityRef>& entities) {
+		entities.push(e);
 		for (EntityPtr child = m_universe->getFirstChild(e); 
 			child.isValid(); 
 			child = m_universe->getNextSibling((EntityRef)child)) 
 		{
 			const EntityRef ch = (EntityRef)child;
-			if (entities->indexOf(ch) < 0) {
+			if (entities.indexOf(ch) < 0) {
 				gatherHierarchy(ch, entities);
 			}
 		}
@@ -2206,7 +2398,7 @@ public:
 		Array<EntityRef> entities(m_allocator);
 		entities.reserve(m_selected_entities.size());
 		for (EntityRef e : m_selected_entities) {
-			gatherHierarchy(e, Ref(entities));
+			gatherHierarchy(e, entities);
 		}
 		copyEntities(entities, m_copy_buffer);
 	}
@@ -2225,63 +2417,46 @@ public:
 	void destroyComponent(Span<const EntityRef> entities, ComponentType cmp_type) override
 	{
 		ASSERT(entities.length() > 0);
-		IEditorCommand* command = LUMIX_NEW(m_allocator, DestroyComponentCommand)(*this, entities, cmp_type);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command = UniquePtr<DestroyComponentCommand>::create(m_allocator, *this, entities, cmp_type);
+		executeCommand(command.move());
 	}
 
 
 	void addComponent(Span<const EntityRef> entities, ComponentType cmp_type) override
 	{
 		ASSERT(entities.length() > 0);
-		IEditorCommand* command = LUMIX_NEW(m_allocator, AddComponentCommand)(*this, entities, cmp_type);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command = UniquePtr<AddComponentCommand>::create(m_allocator, *this, entities, cmp_type);
+		executeCommand(command.move());
 	}
 
 	void saveProject() {
 		const char* base_path = m_engine.getFileSystem().getBasePath();
-		const StaticString<MAX_PATH_LENGTH> path(base_path, "lumix.prj");
-		OS::OutputFile file;
+		const StaticString<LUMIX_MAX_PATH> path(base_path, "lumix.prj");
+		os::OutputFile file;
 		if (file.open(path)) {
 			OutputMemoryStream stream(m_allocator);
 			m_engine.serializeProject(stream);
 			bool saved = true;
 			if (!file.write(stream.data(), stream.size())) {
-				logError("Editor") << "Failed to save project " << path;
+				logError("Failed to save project ", path);
 				saved = false;
 			}
 			file.close();
-			if (!saved) OS::deleteFile(path);
+			if (!saved) os::deleteFile(path);
 			return;
 		}
-		logError("Editor") << "Failed to save project " << path;
+		logError("Failed to save project ", path);
 	}
 
 	bool loadProject() override {
-		const char* base_path = m_engine.getFileSystem().getBasePath();
-		const StaticString<MAX_PATH_LENGTH> path(base_path, "lumix.prj");
-		OS::InputFile file;
-		if (file.open(path)) {
-			const u64 size = file.size();
-			if (size < 8) {
-				logError("Editor") << "Invalid file " << path;
-				file.close();
-				return false;
-			}
-			OutputMemoryStream data(m_allocator);
-			data.resize((u32)size);
-			if (!file.read(data.getMutableData(), data.size())) {
-				logError("Editor") << "Failed to read " << path;
-				file.close();
-				return false;
-			}
-			InputMemoryStream stream(data);
-			bool res = m_engine.deserializeProject(stream);
-			file.close();
-			return res;
-		}
-		logError("Editor") << "Failed to open " << path;
-		return false;
+		OutputMemoryStream data(m_allocator);
+		if (!m_engine.getFileSystem().getContentSync(Path("lumix.prj"), data)) return false;
+		
+		InputMemoryStream stream(data);
+		return m_engine.deserializeProject(stream);
 	}
+	
+	bool isLoading() const override { return m_is_loading; }
 
 	void loadUniverse(const char* basename) override
 	{
@@ -2289,18 +2464,18 @@ public:
 		destroyUniverse();
 		createUniverse();
 		m_universe->setName(basename);
-		logInfo("Editor") << "Loading universe " << basename << "...";
-		OS::InputFile file;
-		const StaticString<MAX_PATH_LENGTH> path(m_engine.getFileSystem().getBasePath(), "universes/", basename, "/entities.unv");
+		logInfo("Loading universe ", basename, "...");
+		os::InputFile file;
+		const StaticString<LUMIX_MAX_PATH> path(m_engine.getFileSystem().getBasePath(), "universes/", basename, ".unv");
 		if (file.open(path)) {
 			if (!load(file)) {
-				logError("Editor") << "Failed to parse " << path;
+				logError("Failed to parse ", path);
 				newUniverse();
 			}
 			file.close();
 		}
 		else {
-			logError("Editor") << "Failed to open " << path;
+			logError("Failed to open ", path);
 			newUniverse();
 		}
 	}
@@ -2310,13 +2485,14 @@ public:
 	{
 		destroyUniverse();
 		createUniverse();
-		logInfo("Editor") << "Universe created.";
+		logInfo("Universe created.");
 	}
 
 
 	enum class SerializedVersion : i32
 	{
 		CAMERA,
+		ENTITY_FOLDERS,
 		LATEST
 	};
 
@@ -2338,23 +2514,23 @@ public:
 		Header header;
 		const u64 file_size = file.size();
 		if (file_size < sizeof(header)) {
-			logError("Editor") << "Corrupted file.";
+			logError("Corrupted file.");
 			m_is_loading = false;
 			return false;
 		}
 		if (file_size > 0xffFFffFF) {
-			logError("Editor") << "File too big.";
+			logError("File too big.");
 			m_is_loading = false;
 			return false;
 		}
 
-		OS::Timer timer;
-		logInfo("Editor") << "Parsing universe...";
+		os::Timer timer;
+		logInfo("Parsing universe...");
 		OutputMemoryStream data(m_allocator);
 		if (!file.getBuffer()) {
 			data.resize((u32)file_size);
 			if (!file.read(data.getMutableData(), data.size())) {
-				logError("Editor") << "Failed to load file.";
+				logError("Failed to load file.");
 				m_is_loading = false;
 				return false;
 			}
@@ -2378,15 +2554,18 @@ public:
 		}
 		if (crc32((const u8*)blob.getData() + hashed_offset, (int)blob.size() - hashed_offset) != hash)
 		{
-			logError("Editor") << "Corrupted file.";
+			logError("Corrupted file.");
 			m_is_loading = false;
 			return false;
 		}
 
 		EntityMap entity_map(m_allocator);
-		if (m_engine.deserialize(*m_universe, blob, Ref(entity_map)))
+		if (m_engine.deserialize(*m_universe, blob, entity_map))
 		{
 			m_prefab_system->deserialize(blob, entity_map);
+			if (header.version > (i32)SerializedVersion::ENTITY_FOLDERS) {
+				m_entity_folders->deserialize(blob, entity_map);
+			}
 			if (header.version > (i32)SerializedVersion::CAMERA) {
 				DVec3 pos;
 				Quat rot;
@@ -2400,7 +2579,8 @@ public:
 				}
 
 			}
-			logInfo("Editor") << "Universe parsed in " << timer.getTimeSinceStart() << " seconds";
+			logInfo("Universe parsed in ", timer.getTimeSinceStart(), " seconds");
+			m_view->refreshIcons();
 			m_is_loading = false;
 			return true;
 		}
@@ -2424,11 +2604,10 @@ public:
 		, m_is_game_mode(false)
 		, m_undo_index(-1)
 		, m_engine(engine)
-        , m_game_mode_file(m_allocator)
-		, m_command_queue(m_allocator)
+		, m_game_mode_file(m_allocator)
 	{
 		loadProject();
-		logInfo("Editor") << "Initializing editor...";
+		logInfo("Initializing editor...");
 
 		m_prefab_system = PrefabSystem::create(*this);
 		createUniverse();
@@ -2451,8 +2630,8 @@ public:
 	{
 		if (cmp.isValid())
 		{
-			IEditorCommand* command = LUMIX_NEW(m_allocator, AddArrayPropertyItemCommand)(*this, cmp, property);
-			executeCommand(command);
+			UniquePtr<IEditorCommand> command = UniquePtr<AddArrayPropertyItemCommand>::create(m_allocator, *this, cmp, property);
+			executeCommand(command.move());
 		}
 	}
 
@@ -2461,16 +2640,15 @@ public:
 	{
 		if (cmp.isValid())
 		{
-			IEditorCommand* command = LUMIX_NEW(m_allocator, RemoveArrayPropertyItemCommand)(*this, cmp, index, property);
-			executeCommand(command);
+			UniquePtr<IEditorCommand> command = UniquePtr<RemoveArrayPropertyItemCommand>::create(m_allocator, *this, cmp, index, property);
+			executeCommand(command.move());
 		}
 	}
 
 	template <typename T>
 	void set(ComponentType cmp, const char* array, int idx, const char* prop, Span<const EntityRef> entities, T val) {
-		IEditorCommand* command = LUMIX_NEW(m_allocator, SetPropertyCommand<T>)(
-			*this, entities, cmp, array, idx, prop, val);
-		executeCommand(command);
+		UniquePtr<IEditorCommand> command = UniquePtr<SetPropertyCommand<T>>::create(m_allocator, *this, entities, cmp, array, idx, prop, val);
+		executeCommand(command.move());
 		
 	}
 
@@ -2485,6 +2663,15 @@ public:
 	void setProperty(ComponentType cmp, const char* array, int idx, const char* prop, Span<const EntityRef> entities, const Vec3& val) override { set(cmp, array, idx, prop, entities, val); }
 	void setProperty(ComponentType cmp, const char* array, int idx, const char* prop, Span<const EntityRef> entities, const Vec4& val) override { set(cmp, array, idx, prop, entities, val); }
 	void setProperty(ComponentType cmp, const char* array, int idx, const char* prop, Span<const EntityRef> entities, const IVec3& val) override { set(cmp, array, idx, prop, entities, val); }
+
+	static void fastRemoveDuplicates(Array<EntityRef>& entities) {
+		qsort(entities.begin(), entities.size(), sizeof(entities[0]), [](const void* a, const void* b){
+			return memcmp(a, b, sizeof(EntityRef));
+		});
+		for (i32 i = entities.size() - 2; i >= 0; --i) {
+			if (entities[i] == entities[i + 1]) entities.swapAndPop(i);
+		}
+	}
 
 	void selectEntities(Span<const EntityRef> entities, bool toggle) override {
 		if (!toggle) {
@@ -2504,8 +2691,7 @@ public:
 				}
 			}
 		}
-
-		m_selected_entities.removeDuplicates();
+		fastRemoveDuplicates(m_selected_entities);
 	}
 
 
@@ -2521,6 +2707,7 @@ public:
 
 		ASSERT(m_universe);
 		destroyUndoStack();
+		m_entity_folders.destroy();
 		m_universe_destroyed.invoke();
 		m_prefab_system->setUniverse(nullptr);
 		selectEntities({}, false);
@@ -2544,10 +2731,6 @@ public:
 	void destroyUndoStack()
 	{
 		m_undo_index = -1;
-		for (int i = 0; i < m_undo_stack.size(); ++i)
-		{
-			LUMIX_DELETE(m_allocator, m_undo_stack[i]);
-		}
 		m_undo_stack.clear();
 	}
 
@@ -2562,6 +2745,7 @@ public:
 		Universe* universe = m_universe;
 
 		universe->entityDestroyed().bind<&WorldEditorImpl::onEntityDestroyed>(this);
+		m_entity_folders.create(*m_universe, m_allocator);
 
 		m_selected_entities.clear();
 		m_universe_created.invoke();
@@ -2645,13 +2829,13 @@ private:
 	IAllocator& m_allocator;
 	Engine& m_engine;
 	UniverseView* m_view = nullptr;
-	PrefabSystem* m_prefab_system;
+	UniquePtr<PrefabSystem> m_prefab_system;
+	Local<EntityFolders> m_entity_folders;
 	Universe* m_universe;
 	bool m_is_loading;
 	bool m_is_universe_changed;
 	
-	Array<IEditorCommand*> m_undo_stack;
-	Array<IEditorCommand*> m_command_queue;
+	Array<UniquePtr<IEditorCommand>> m_undo_stack;
 	int m_undo_index;
 	u32 m_current_group_type;
 
@@ -2689,7 +2873,7 @@ public:
 
 		Universe& universe = *m_editor.getUniverse();
 		int entity_count;
-		blob.read(Ref(entity_count));
+		blob.read(entity_count);
 		bool is_redo = !m_entities.empty();
 		if (is_redo)
 		{
@@ -2712,17 +2896,17 @@ public:
 		m_map.reserve(entity_count);
 		for (int i = 0; i < entity_count; ++i) {
 			EntityRef orig_e;
-			blob.read(Ref(orig_e));
+			blob.read(orig_e);
 			if (!is_redo) m_map.insert(orig_e, i);
 		}
 		for (int i = 0; i < entity_count; ++i)
 		{
 			Transform tr;
-			blob.read(Ref(tr));
+			blob.read(tr);
 			const char* name = blob.readString();
 			if (name[0]) universe.setEntityName(m_entities[i], name);
 			EntityPtr parent;
-			blob.read(Ref(parent));
+			blob.read(parent);
 
 			auto iter = m_map.find(parent);
 			if (iter.isValid()) parent = m_entities[iter.value()];
@@ -2748,19 +2932,19 @@ public:
 			universe.setParent(parent, new_entity);
 			for (;;) {
 				u32 hash;
-				blob.read(Ref(hash));
+				blob.read(hash);
 				if (hash == 0) break;
 
 				ComponentUID cmp;
 				cmp.entity = new_entity;
-				cmp.type = Reflection::getComponentTypeFromHash(hash);
+				cmp.type = reflection::getComponentTypeFromHash(hash);
 				cmp.scene = universe.getScene(cmp.type);
 
 				cmp.scene->getUniverse().createComponent(cmp.type, new_entity);
 
-				PropertyDeserializeVisitor visitor(Ref<InputMemoryStream>(blob), cmp, m_map, m_entities);
+				PropertyDeserializeVisitor visitor(blob, cmp, m_map, m_entities);
 				visitor.idx = -1;
-				Reflection::getComponent(cmp.type)->visit(visitor);
+				reflection::getComponent(cmp.type)->visit(visitor);
 			}
 		}
 		return true;
@@ -2801,8 +2985,8 @@ private:
 void WorldEditorImpl::pasteEntities()
 {
 	if (!canPasteEntities()) return;
-	PasteEntityCommand* command = LUMIX_NEW(m_allocator, PasteEntityCommand)(*this, m_copy_buffer);
-	executeCommand(command);
+	UniquePtr<PasteEntityCommand> command = UniquePtr<PasteEntityCommand>::create(m_allocator, *this, m_copy_buffer);
+	executeCommand(command.move());
 }
 
 
@@ -2810,20 +2994,14 @@ void WorldEditorImpl::duplicateEntities()
 {
 	copyEntities();
 
-	PasteEntityCommand* command = LUMIX_NEW(m_allocator, PasteEntityCommand)(*this, m_copy_buffer, true);
-	executeCommand(command);
+	UniquePtr<PasteEntityCommand> command = UniquePtr<PasteEntityCommand>::create(m_allocator, *this, m_copy_buffer, true);
+	executeCommand(command.move());
 }
 
 
-WorldEditor* WorldEditor::create(Engine& engine, IAllocator& allocator)
+UniquePtr<WorldEditor> WorldEditor::create(Engine& engine, IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, WorldEditorImpl)(engine, allocator);
-}
-
-
-void WorldEditor::destroy(WorldEditor* editor, IAllocator& allocator)
-{
-	LUMIX_DELETE(allocator, static_cast<WorldEditorImpl*>(editor));
+	return UniquePtr<WorldEditorImpl>::create(allocator, engine, allocator);
 }
 
 

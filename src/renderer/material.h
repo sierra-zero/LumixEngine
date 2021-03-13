@@ -24,7 +24,8 @@ struct  MaterialConsts {
 	float roughness;
 	float metallic;
 	float emission;
-	float custom[57];
+	float translucency;
+	float custom[56];
 };
 
 struct MaterialManager : ResourceManager {
@@ -41,16 +42,14 @@ private:
 	lua_State* m_state;
 };
 
-struct LUMIX_RENDERER_API Material final : Resource
-{
-friend struct MaterialManager;
-public:
+struct LUMIX_RENDERER_API Material final : Resource {
+	friend struct MaterialManager;
 	static const int MAX_TEXTURE_COUNT = 16;
 
 	struct RenderData {
 		gpu::TextureHandle textures[MAX_TEXTURE_COUNT];
 		int textures_count;
-		u64 render_states;
+		gpu::StateFlags render_states;
 		u32 material_constants;
 		u32 define_mask;
 	};
@@ -70,7 +69,6 @@ public:
 
 	static const ResourceType TYPE;
 
-public:
 	Material(const Path& path, ResourceManager& resource_manager, Renderer& renderer, IAllocator& allocator);
 	~Material();
 
@@ -85,11 +83,13 @@ public:
 	void setRoughness(float value) { m_roughness = value; updateRenderData(false); }
 	float getEmission() const { return m_emission; }
 	void setEmission(float value) { m_emission = value; updateRenderData(false); }
+	float getTranslucency() const { return m_translucency; }
+	void setTranslucency(float value) { m_translucency = value; updateRenderData(false); }
 	Vec4 getColor() const { return m_color; }
 	void setColor(const Vec4& color) { m_color = color; updateRenderData(false); }
 	float getAlphaRef() const { return m_alpha_ref; }
 	void setAlphaRef(float value) { m_alpha_ref = value; updateRenderData(false); }
-	u64 getRenderStates() const { return m_render_states; }
+	gpu::StateFlags getRenderStates() const { return m_render_states; }
 	void enableBackfaceCulling(bool enable);
 	bool isBackfaceCulling() const;
 
@@ -125,6 +125,7 @@ public:
 	static const char* getCustomFlagName(int index);
 	static int getCustomFlagCount();
 	void updateRenderData(bool on_before_ready);
+	Array<Uniform>& getUniforms() { return m_uniforms; }
 
 private:
 	void onBeforeReady() override;
@@ -139,12 +140,13 @@ private:
 	float m_metallic;
 	float m_roughness;
 	float m_emission;
+	float m_translucency;
 	Vec4 m_color;
 	float m_alpha_ref;
 	Texture* m_textures[MAX_TEXTURE_COUNT];
 	u32 m_texture_count;
 	u32 m_define_mask;
-	u64 m_render_states;
+	gpu::StateFlags m_render_states;
 	RenderData* m_render_data;
 	u8 m_layer;
 	u32 m_sort_key;

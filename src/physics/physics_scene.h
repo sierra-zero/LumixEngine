@@ -1,6 +1,7 @@
 #pragma once
 
 
+#include "engine/allocator.h"
 #include "engine/lumix.h"
 #include "engine/plugin.h"
 #include "engine/math.h"
@@ -84,9 +85,8 @@ struct LUMIX_PHYSICS_API PhysicsScene : IScene
 
 	using ContactCallbackHandle = int;
 
-	static PhysicsScene* create(PhysicsSystem& system, Universe& context, Engine& engine, IAllocator& allocator);
-	static void destroy(PhysicsScene* scene);
-	static void registerLuaAPI(lua_State* L);
+	static UniquePtr<PhysicsScene> create(PhysicsSystem& system, Universe& context, Engine& engine, IAllocator& allocator);
+	static void reflect();
 
 	virtual ~PhysicsScene() {}
 	virtual void render() = 0;
@@ -178,6 +178,7 @@ struct LUMIX_PHYSICS_API PhysicsScene : IScene
 	virtual Vec2 getSphericalJointLimit(EntityRef entity) = 0;
 	virtual void setSphericalJointLimit(EntityRef entity, const Vec2& limit) = 0;
 
+	virtual void addForceAtPos(EntityRef entity, const Vec3& force, const Vec3& pos) = 0;
 	virtual void applyForceToActor(EntityRef entity, const Vec3& force) = 0;
 	virtual void applyImpulseToActor(EntityRef entity, const Vec3& force) = 0;
 	virtual Vec3 getActorVelocity(EntityRef entity) = 0;
@@ -224,6 +225,7 @@ struct LUMIX_PHYSICS_API PhysicsScene : IScene
 
 	virtual BoneOrientation getNewBoneOrientation() const = 0;
 	virtual void setNewBoneOrientation(BoneOrientation orientation) = 0;
+	virtual void setRagdollKinematic(EntityRef entity, bool is_kinematic) = 0;
 	virtual RagdollBone* createRagdollBone(EntityRef entity, u32 bone_name_hash) = 0;
 	virtual void destroyRagdollBone(EntityRef entity, RagdollBone* bone) = 0;
 	virtual physx::PxJoint* getRagdollBoneJoint(RagdollBone* bone) const = 0;
@@ -247,6 +249,14 @@ struct LUMIX_PHYSICS_API PhysicsScene : IScene
 	virtual void setRagdollLayer(EntityRef entity, u32 layer) = 0;
 	virtual u32 getRagdollLayer(EntityRef entity) = 0;
 
+	virtual float getWheelSpringStrength(EntityRef entity) = 0;
+	virtual void setWheelSpringStrength(EntityRef entity, float str) = 0;
+	virtual float getWheelSpringMaxCompression(EntityRef entity) = 0;
+	virtual void setWheelSpringMaxCompression(EntityRef entity, float str) = 0;
+	virtual float getWheelSpringMaxDroop(EntityRef entity) = 0;
+	virtual void setWheelSpringMaxDroop(EntityRef entity, float str) = 0;
+	virtual float getWheelSpringDamperRate(EntityRef entity) = 0;
+	virtual void setWheelSpringDamperRate(EntityRef entity, float rate) = 0;
 	virtual float getWheelRadius(EntityRef entity) = 0;
 	virtual void setWheelRadius(EntityRef entity, float r) = 0;
 	virtual float getWheelWidth(EntityRef entity) = 0;
@@ -257,6 +267,22 @@ struct LUMIX_PHYSICS_API PhysicsScene : IScene
 	virtual void setWheelMOI(EntityRef entity, float moi) = 0;
 	virtual WheelSlot getWheelSlot(EntityRef entity) = 0;
 	virtual void setWheelSlot(EntityRef entity, WheelSlot s) = 0;
+
+	virtual void setVehicleAccel(EntityRef entity, bool accel) = 0;
+	virtual void setVehicleSteer(EntityRef entity, float value) = 0;
+	virtual void setVehicleBrake(EntityRef entity, float value) = 0;
+	virtual Path getVehicleChassis(EntityRef entity) = 0;
+	virtual void setVehicleChassis(EntityRef entity, const Path& path) = 0;
+	virtual float getVehicleMass(EntityRef entity) = 0;
+	virtual void setVehicleMass(EntityRef entity, float mass) = 0;
+	virtual float getVehicleMOIMultiplier(EntityRef entity) = 0;
+	virtual void setVehicleMOIMultiplier(EntityRef entity, float m) = 0;
+	virtual Vec3 getVehicleCenterOfMass(EntityRef entity) = 0;
+	virtual void setVehicleCenterOfMass(EntityRef entity, Vec3 center) = 0;
+	virtual u32 getVehicleWheelsLayer(EntityRef entity) = 0;
+	virtual void setVehicleWheelsLayer(EntityRef entity, u32 layer) = 0;
+	virtual u32 getVehicleChassisLayer(EntityRef entity) = 0;
+	virtual void setVehicleChassisLayer(EntityRef entity, u32 layer) = 0;
 
 	virtual u32 getDebugVisualizationFlags() const = 0;
 	virtual void setDebugVisualizationFlags(u32 flags) = 0;

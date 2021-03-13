@@ -60,10 +60,11 @@ namespace Lumix { struct Vec2; }
 
 #define IM_VEC2_CLASS_EXTRA                                                         \
         ImVec2(const Lumix::Vec2& f);                                               \
-        operator Lumix::Vec2() const;                                               \
+        IMGUI_API operator Lumix::Vec2() const;                                               \
         ImVec2 operator+(const ImVec2& rhs) { return ImVec2(x+rhs.x, y+rhs.y); }    \
         ImVec2 operator-(const ImVec2& rhs) { return ImVec2(x-rhs.x, y-rhs.y); }    \
         ImVec2 operator*(const ImVec2& rhs) { return ImVec2(x*rhs.x, y*rhs.y); }    \
+        ImVec2 operator*(float rhs) { return ImVec2(x*rhs, y*rhs); }				\
         ImVec2 operator/(const ImVec2& rhs) { return ImVec2(x/rhs.x, y/rhs.y); }
 /*
 #define IM_VEC4_CLASS_EXTRA                                                 \

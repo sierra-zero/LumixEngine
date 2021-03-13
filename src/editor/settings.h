@@ -35,7 +35,6 @@ struct LUMIX_EDITOR_API Settings {
 	bool m_is_properties_open;
 	bool m_is_crash_reporting_enabled;
 	bool m_force_no_crash_report;
-	float m_asset_browser_left_column_width;
 	Vec2 m_mouse_sensitivity;
 	float m_mouse_sensitivity_y;
 	int m_font_size = 13;
@@ -49,8 +48,10 @@ struct LUMIX_EDITOR_API Settings {
 	void onGUI();
 	void setValue(const char* name, bool value) const;
 	void setValue(const char* name, int value) const;
+	void setValue(const char* name, const char* value) const;
 	int getValue(const char* name, int default_value) const;
 	bool getValue(const char* name, bool default_value) const;
+	u32 getValue(const char* name, Span<char> out) const;
 
 private:
 	StudioApp& m_app;
@@ -59,7 +60,7 @@ private:
 
 private:
 	void showShortcutSettings();
-	void showToolbarSettings() const;
+	void showStyleEditor() const;
 };
 
 

@@ -1,5 +1,3 @@
-#include <imgui/imgui.h>
-
 #include "engine/atomic.h"
 #include "engine/crc32.h"
 #include "engine/debug.h"
@@ -9,17 +7,16 @@
 #include "engine/plugin.h"
 #include "engine/job_system.h"
 #include "engine/log.h"
-#include "engine/lua_wrapper.h"
 #include "engine/math.h"
 #include "engine/page_allocator.h"
 #include "engine/path.h"
 #include "engine/prefab.h"
 #include "engine/profiler.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "engine/universe.h"
-
+#include <lua.hpp>
 
 namespace Lumix
 {
@@ -66,7 +63,7 @@ public:
 	void operator=(const EngineImpl&) = delete;
 	EngineImpl(const EngineImpl&) = delete;
 
-	EngineImpl(const InitArgs& init_data, IAllocator& allocator)
+	EngineImpl(InitArgs&& init_data, IAllocator& allocator)
 		: m_allocator(allocator)
 		, m_prefab_resource_manager(m_allocator)
 		, m_resource_manager(m_allocator)
@@ -78,56 +75,66 @@ public:
 		, m_paused(false)
 		, m_next_frame(false)
 	{
-		OS::init();
-		OS::InitWindowArgs init_win_args;
+		os::init();
+		os::InitWindowArgs init_win_args;
 		init_win_args.fullscreen = init_data.fullscreen;
 		init_win_args.handle_file_drops = init_data.handle_file_drops;
 		init_win_args.name = init_data.window_title;
-		m_window_handle = OS::createWindow(init_win_args);
-		if (m_window_handle == OS::INVALID_WINDOW) {
-			logError("Engine") << "Failed to create main window.";
+		m_window_handle = os::createWindow(init_win_args);
+		if (m_window_handle == os::INVALID_WINDOW) {
+			logError("Failed to create main window.");
 		}
 
 		m_is_log_file_open = m_log_file.open("lumix.log");
 		
-		logInfo("Core") << "Creating engine...";
-		Profiler::setThreadName("Worker");
+		logInfo("Creating engine...");
+		profiler::setThreadName("Worker");
 		installUnhandledExceptionHandler();
 
-		getLogCallback().bind<&EngineImpl::logToFile>(this);
-		getLogCallback().bind<logToDebugOutput>();
+		registerLogCallback<&EngineImpl::logToFile>(this);
+		registerLogCallback<logToDebugOutput>();
 
-		OS::logVersion();
+		os::logVersion();
 
 		m_state = luaL_newstate();
 		luaL_openlibs(m_state);
 
 		registerEngineAPI(m_state, this);
 
-		if (init_data.working_dir) {
+		if (init_data.file_system.get()) {
+			m_file_system = static_cast<UniquePtr<FileSystem>&&>(init_data.file_system);
+		}
+		else if (init_data.working_dir) {
 			m_file_system = FileSystem::create(init_data.working_dir, m_allocator);
 		}
 		else {
-			char current_dir[MAX_PATH_LENGTH];
-			OS::getCurrentDirectory(Span(current_dir)); 
+			char current_dir[LUMIX_MAX_PATH];
+			os::getCurrentDirectory(Span(current_dir)); 
 			m_file_system = FileSystem::create(current_dir, m_allocator);
 		}
 
 		m_resource_manager.init(*m_file_system);
 		m_prefab_resource_manager.create(PrefabResource::TYPE, m_resource_manager);
 
-		Reflection::init(m_allocator);
-
 		m_plugin_manager = PluginManager::create(*this);
 		m_input_system = InputSystem::create(*this);
 
-		logInfo("Core") << "Engine created.";
+		logInfo("Engine created.");
 
-		StaticPluginRegister::createAll(*this);
-		
+		PluginManager::createAllStatic(*this);
+
+		#ifdef LUMIXENGINE_PLUGINS
+			const char* plugins[] = { LUMIXENGINE_PLUGINS };
+			for (auto* plugin_name : plugins) {
+				if (plugin_name[0] && !m_plugin_manager->load(plugin_name)) {
+					logInfo(plugin_name, " plugin has not been loaded");
+				}
+			}
+		#endif
+
 		for (auto* plugin_name : init_data.plugins) {
 			if (plugin_name[0] && !m_plugin_manager->load(plugin_name)) {
-				logInfo("Editor") << plugin_name << " plugin has not been loaded";
+				logInfo(plugin_name, " plugin has not been loaded");
 			}
 		}
 
@@ -137,46 +144,45 @@ public:
 	~EngineImpl()
 	{
 		for (Resource* res : m_lua_resources) {
-			res->getResourceManager().unload(*res);
+			res->decRefCount();
 		}
 
-		Reflection::shutdown();
-		PluginManager::destroy(m_plugin_manager);
-		if (m_input_system) InputSystem::destroy(*m_input_system);
-		FileSystem::destroy(m_file_system);
+		m_plugin_manager.reset();
+		m_input_system.reset();
+		m_file_system.reset();
 
 		m_prefab_resource_manager.destroy();
 		lua_close(m_state);
 
-		getLogCallback().unbind<&EngineImpl::logToFile>(this);
+		unregisterLogCallback<&EngineImpl::logToFile>(this);
 		m_log_file.close();
 		m_is_log_file_open = false;
-		OS::destroyWindow(m_window_handle);
+		os::destroyWindow(m_window_handle);
 	}
 
-	static void logToDebugOutput(LogLevel level, const char* system, const char* message)
+	static void logToDebugOutput(LogLevel level, const char* message)
 	{
 		if(level == LogLevel::ERROR) {
-			Debug::debugOutput("Error: ");
+			debug::debugOutput("Error: ");
 		}
-		Debug::debugOutput(system);
-		Debug::debugOutput(":: ");
-		Debug::debugOutput(message);
-		Debug::debugOutput("\n");
+		debug::debugOutput(message);
+		debug::debugOutput("\n");
 	}
 
-	void logToFile(LogLevel level, const char*, const char* message)
+	void logToFile(LogLevel level, const char* message)
 	{
 		if (!m_is_log_file_open) return;
+		bool success = true;
 		if (level == LogLevel::ERROR) {
-			m_log_file.write("Error: ", stringLength("Error :"));
+			success = m_log_file.write("Error: ", stringLength("Error :"));
 		}
-		m_log_file.write(message, stringLength(message));
-		m_log_file.write("\n", 1);
+		success = m_log_file.write(message, stringLength(message)) && success ;
+		success = m_log_file.write("\n", 1) && success ;
+		ASSERT(success);
 		m_log_file.flush();
 	}
 
-	OS::WindowHandle getWindowHandle() override { return m_window_handle; }
+	os::WindowHandle getWindowHandle() override { return m_window_handle; }
 	IAllocator& getAllocator() override { return m_allocator; }
 	PageAllocator& getPageAllocator() override { return m_page_allocator; }
 
@@ -185,17 +191,17 @@ public:
 		const struct DVec3& pos,
 		const struct Quat& rot,
 		float scale,
-		Ref<EntityMap> entity_map) override
+		EntityMap& entity_map) override
 	{
 		ASSERT(prefab.isReady());
 		InputMemoryStream blob(prefab.data);
 		if (!deserialize(universe, blob, entity_map)) {
-			logError("Engine") << "Failed to instantiate prefab " << prefab.getPath();
+			logError("Failed to instantiate prefab ", prefab.getPath());
 			return false;
 		}
 
-		ASSERT(!entity_map->m_map.empty());
-		const EntityRef root = (EntityRef)entity_map->m_map[0];
+		ASSERT(!entity_map.m_map.empty());
+		const EntityRef root = (EntityRef)entity_map.m_map[0];
 		ASSERT(!universe.getParent(root).isValid());
 		ASSERT(!universe.getNextSibling(root).isValid());
 		universe.setTransform(root, pos, rot, scale);
@@ -204,19 +210,18 @@ public:
 
 	Universe& createUniverse(bool is_main_universe) override
 	{
-		Universe* universe = LUMIX_NEW(m_allocator, Universe)(m_allocator);
+		Universe* universe = LUMIX_NEW(m_allocator, Universe)(*this, m_allocator);
 		const Array<IPlugin*>& plugins = m_plugin_manager->getPlugins();
 		for (auto* plugin : plugins) {
 			plugin->createScenes(*universe);
 		}
 
-		for (IScene* scene : universe->getScenes()) {
+		for (UniquePtr<IScene>& scene : universe->getScenes()) {
 			scene->init();
 		}
 
 		if (is_main_universe) {
 			lua_State* L = m_state;
-			LuaWrapper::DebugGuard guard(L);
 			lua_getglobal(L, "Lumix"); // [ Lumix ]
 			lua_getfield(L, -1, "Universe"); // [ Lumix, Universe ]
 			lua_getfield(L, -1, "new"); // [ Lumix, Universe, new ]
@@ -233,13 +238,11 @@ public:
 
 	void destroyUniverse(Universe& universe) override
 	{
-		auto& scenes = universe.getScenes();
-		for (int i = scenes.size() - 1; i >= 0; --i)
-		{
-			auto* scene = scenes[i];
-			scenes.pop();
+		Array<UniquePtr<IScene>>& scenes = universe.getScenes();
+		while (!scenes.empty()) {
+			UniquePtr<IScene>& scene = scenes.back();
 			scene->clear();
-			scene->getPlugin().destroyScene(scene);
+			scenes.pop();
 		}
 		LUMIX_DELETE(m_allocator, &universe);
 		m_resource_manager.removeUnreferenced();
@@ -250,7 +253,7 @@ public:
 	{
 		ASSERT(!m_is_game_running);
 		m_is_game_running = true;
-		for (auto* scene : context.getScenes())
+		for (UniquePtr<IScene>& scene : context.getScenes())
 		{
 			scene->startGame();
 		}
@@ -265,7 +268,7 @@ public:
 	{
 		ASSERT(m_is_game_running);
 		m_is_game_running = false;
-		for (auto* scene : context.getScenes())
+		for (UniquePtr<IScene>& scene : context.getScenes())
 		{
 			scene->stopGame();
 		}
@@ -275,6 +278,9 @@ public:
 		}
 	}
 
+	bool isPaused() const override {
+		return m_paused;
+	}
 
 	void pause(bool pause) override
 	{
@@ -306,14 +312,14 @@ public:
 		m_last_time_delta = dt;
 		{
 			PROFILE_BLOCK("update scenes");
-			for (auto* scene : context.getScenes())
+			for (UniquePtr<IScene>& scene : context.getScenes())
 			{
 				scene->update(dt, m_paused);
 			}
 		}
 		{
 			PROFILE_BLOCK("late update scenes");
-			for (auto* scene : context.getScenes())
+			for (UniquePtr<IScene>& scene : context.getScenes())
 			{
 				scene->lateUpdate(dt, m_paused);
 			}
@@ -333,7 +339,7 @@ public:
 	void serializeSceneVersions(OutputMemoryStream& serializer, Universe& ctx)
 	{
 		serializer.write(ctx.getScenes().size());
-		for (auto* scene : ctx.getScenes())
+		for (UniquePtr<IScene>& scene : ctx.getScenes())
 		{
 			serializer.write(crc32(scene->getPlugin().getName()));
 			serializer.write(scene->getVersion());
@@ -351,27 +357,6 @@ public:
 	}
 
 
-	bool hasSupportedSceneVersions(InputMemoryStream& serializer, Universe& ctx)
-	{
-		i32 count;
-		serializer.read(count);
-		for (int i = 0; i < count; ++i)
-		{
-			u32 hash;
-			serializer.read(hash);
-			auto* scene = ctx.getScene(hash);
-			int version;
-			serializer.read(version);
-			if (version != scene->getVersion())
-			{
-				logError("Core") << "Plugin " << scene->getPlugin().getName() << " has incompatible version";
-				return false;
-			}
-		}
-		return true;
-	}
-
-
 	bool hasSerializedPlugins(InputMemoryStream& serializer)
 	{
 		i32 count;
@@ -381,7 +366,7 @@ public:
 			const char* tmp = serializer.readString();
 			if (!m_plugin_manager->getPlugin(tmp))
 			{
-				logError("Core") << "Missing plugin " << tmp;
+				logError("Missing plugin ", tmp);
 				return false;
 			}
 		}
@@ -434,13 +419,13 @@ public:
 		header.version = 0;
 		serializer.write(header);
 		serializePluginList(serializer);
-		serializeSceneVersions(serializer, ctx);
+		//serializeSceneVersions(serializer, ctx);
 		i32 pos = (i32)serializer.size();
 		ctx.serialize(serializer);
 		serializer.write((i32)ctx.getScenes().size());
-		for (IScene* scene : ctx.getScenes())
-		{
+		for (UniquePtr<IScene>& scene : ctx.getScenes()) {
 			serializer.writeString(scene->getPlugin().getName());
+			serializer.write(scene->getVersion());
 			scene->serialize(serializer);
 		}
 		u32 crc = crc32((const u8*)serializer.data() + pos, (i32)serializer.size() - pos);
@@ -448,17 +433,16 @@ public:
 	}
 
 
-	bool deserialize(Universe& ctx, InputMemoryStream& serializer, Ref<EntityMap> entity_map) override
+	bool deserialize(Universe& ctx, InputMemoryStream& serializer, EntityMap& entity_map) override
 	{
 		SerializedEngineHeader header;
 		serializer.read(header);
 		if (header.magic != SERIALIZED_ENGINE_MAGIC)
 		{
-			logError("Core") << "Wrong or corrupted file";
+			logError("Wrong or corrupted file");
 			return false;
 		}
 		if (!hasSerializedPlugins(serializer)) return false;
-		if (!hasSupportedSceneVersions(serializer, ctx)) return false;
 
 		ctx.deserialize(serializer, entity_map);
 		i32 scene_count;
@@ -467,7 +451,8 @@ public:
 		{
 			const char* tmp = serializer.readString();
 			IScene* scene = ctx.getScene(crc32(tmp));
-			scene->deserialize(serializer, entity_map);
+			const i32 version = serializer.read<i32>();
+			scene->deserialize(serializer, entity_map, version);
 		}
 		return true;
 	}
@@ -479,7 +464,7 @@ public:
 		if (!iter.isValid()) return;
 		Resource* res = iter.value();
 		m_lua_resources.erase(iter);
-		res->getResourceManager().unload(*res);
+		res->decRefCount();
 	}
 
 
@@ -511,38 +496,29 @@ public:
 private:
 	IAllocator& m_allocator;
 	PageAllocator m_page_allocator;
-
-	FileSystem* m_file_system;
-
+	UniquePtr<FileSystem> m_file_system;
 	ResourceManagerHub m_resource_manager;
-	
-	PluginManager* m_plugin_manager;
+	UniquePtr<PluginManager> m_plugin_manager;
 	PrefabResourceManager m_prefab_resource_manager;
-	InputSystem* m_input_system;
-	OS::Timer m_timer;
+	UniquePtr<InputSystem> m_input_system;
+	os::Timer m_timer;
 	float m_time_multiplier;
 	float m_last_time_delta;
 	bool m_is_game_running;
 	bool m_paused;
 	bool m_next_frame;
-	OS::WindowHandle m_window_handle;
+	os::WindowHandle m_window_handle;
 	lua_State* m_state;
-	OS::OutputFile m_log_file;
+	os::OutputFile m_log_file;
 	bool m_is_log_file_open = false;
 	HashMap<int, Resource*> m_lua_resources;
 	u32 m_last_lua_resource_idx;
 };
 
 
-Engine* Engine::create(const InitArgs& init_data, IAllocator& allocator)
+UniquePtr<Engine> Engine::create(InitArgs&& init_data, IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, EngineImpl)(init_data, allocator);
-}
-
-
-void Engine::destroy(Engine* engine, IAllocator& allocator)
-{
-	LUMIX_DELETE(allocator, engine);
+	return UniquePtr<EngineImpl>::create(allocator, static_cast<InitArgs&&>(init_data), allocator);
 }
 
 

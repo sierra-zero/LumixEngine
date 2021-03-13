@@ -11,7 +11,7 @@ struct BoneMask;
 struct LocalRigidTransform;
 struct Pose;
 
-namespace Anim {
+namespace anim {
 
 struct GroupNode;
 struct RuntimeContext;
@@ -26,8 +26,8 @@ public:
 
 	RuntimeContext* createRuntime(u32 anim_set);
 	void destroyRuntime(RuntimeContext& ctx);
-	void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const;
-	void getPose(RuntimeContext& ctx, Ref<struct Pose> pose);
+	void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const;
+	void getPose(RuntimeContext& ctx, struct Pose& pose);
 	void initEmpty();
 	void destroy();
 
@@ -46,7 +46,9 @@ public:
 	Array<String> m_animation_slots;
 	Array<BoneMask> m_bone_masks;
 	InputDecl m_inputs;
-	enum class Flags : u32 {};
+	enum class Flags : u32 {
+		XZ_ROOT_MOTION = 1 << 0
+	};
 	FlagSet<Flags, u32> m_flags;
 	struct IK {
 		enum { MAX_BONES_COUNT = 8 };
@@ -55,11 +57,12 @@ public:
 		u32 bones[MAX_BONES_COUNT];
 	} m_ik[4];
 	u32 m_ik_count = 0;
+	StaticString<64> m_root_motion_bone;
 
 private:
 	void unload() override;
 	bool load(u64 size, const u8* mem) override;
 };
 
-} // ns Anim
+} // namespace anim
 } // ns Lumix

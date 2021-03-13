@@ -18,11 +18,11 @@ Path::Path()
 	, m_path{}
 {}
 
-Path::Path(const Path& rhs)
-	: m_hash(rhs.m_hash)
-{
-	copyString(m_path, rhs.m_path);
-}
+//Path::Path(const Path& rhs)
+//	: m_hash(rhs.m_hash)
+//{
+//	copyString(m_path, rhs.m_path);
+//}
 
 Path::Path(const char* path) {
 	normalize(path, Span(m_path));
@@ -31,11 +31,6 @@ Path::Path(const char* path) {
 
 i32 Path::length() const {
 	return stringLength(m_path);
-}
-
-void Path::operator =(const Path& rhs) {
-	copyString(m_path, rhs.m_path);
-	m_hash = crc32(m_path);
 }
 
 void Path::operator =(const char* rhs) {
@@ -90,58 +85,57 @@ void Path::normalize(const char* path, Span<char> output)
 	(i < max_size ? *out : *(out - 1)) = '\0';
 }
 
-void Path::getDir(Span<char> dir, const char* src)
+Span<const char> Path::getDir(const char* src)
 {
-	copyString(dir, src);
-	for (int i = stringLength(dir.begin()) - 1; i >= 0; --i)
-	{
-		if (dir[i] == '\\' || dir[i] == '/')
-		{
-			++i;
-			dir[i] = '\0';
-			return;
-		}
+	if (!src[0]) return {nullptr, nullptr};
+	
+	Span<const char> dir;
+	dir.m_begin = src;
+	dir.m_end = src + stringLength(src) - 1;
+	while (dir.m_end != dir.m_begin && *dir.m_end != '\\' && *dir.m_end != '/') {
+		--dir.m_end;
 	}
-	dir[0] = '\0';
+	if (dir.m_end != dir.m_begin) ++dir.m_end;
+	return dir;
 }
 
-void Path::getBasename(Span<char> basename, const char* src)
+Span<const char> Path::getBasename(const char* src)
 {
-	basename[0] = '\0';
-	for (int i = stringLength(src) - 1; i >= 0; --i)
-	{
-		if (src[i] == '\\' || src[i] == '/' || i == 0)
-		{
-			if (src[i] == '\\' || src[i] == '/')
-				++i;
-			u32 j = 0;
-			basename[j] = src[i];
-			while (j < basename.length() - 1 && src[i + j] && src[i + j] != '.')
-			{
-				++j;
-				basename[j] = src[j + i];
-			}
-			basename[j] = '\0';
-			return;
-		}
+	if (!src[0]) return Span<const char>(src, src);
+
+	Span<const char> res;
+	const char* end = src + stringLength(src);
+	res.m_end = end;
+	res.m_begin = end;
+	while (res.m_begin != src && *res.m_begin != '\\' && *res.m_begin != '/') {
+		--res.m_begin;
 	}
+
+	if (*res.m_begin == '\\' || *res.m_begin == '/') ++res.m_begin;
+	res.m_end = res.m_begin;
+
+	while (res.m_end != end && *res.m_end != '.') ++res.m_end;
+
+	return res;
 }
 
 
-void Path::getExtension(Span<char> extension, Span<const char> src)
+Span<const char> Path::getExtension(Span<const char> src)
 {
-	ASSERT(extension.length() > 0);
-	for (int i = src.length() - 1; i >= 0; --i)
-	{
-		if (src[i] == '.')
-		{
-			++i;
-			Span<const char> tmp = { src.begin() + i, src.end() };
-			copyString(extension, tmp);
-			return;
-		}
+	if (src.length() == 0) return src;
+
+	Span<const char> res;
+	res.m_end = src.m_end;
+	res.m_begin = src.m_end - 1;
+
+	while(res.m_begin != src.m_begin && *res.m_begin != '.') {
+		--res.m_begin;
 	}
-	extension[0] = '\0';
+	if (*res.m_begin == '.') {
+		++res.m_begin;
+	}
+	
+	return res;
 }
 
 
@@ -173,18 +167,18 @@ bool Path::replaceExtension(char* path, const char* ext)
 bool Path::hasExtension(const char* filename, const char* ext)
 {
 	char tmp[20];
-	getExtension(Span(tmp), Span(filename, stringLength(filename)));
+	copyString(Span(tmp), getExtension(Span(filename, stringLength(filename))));
 	makeLowercase(Span(tmp), tmp);
 
 	return equalStrings(tmp, ext);
 }
 
 PathInfo::PathInfo(const char* path) {
-	char tmp[MAX_PATH_LENGTH];
+	char tmp[LUMIX_MAX_PATH];
 	Path::normalize(path, Span(tmp));
-	Path::getExtension(Span(m_extension), Span(tmp, stringLength(tmp)));
-	Path::getBasename(Span(m_basename), tmp);
-	Path::getDir(Span(m_dir), tmp);
+	copyString(Span(m_extension), Path::getExtension(Span(tmp, stringLength(tmp))));
+	copyString(Span(m_basename), Path::getBasename(tmp));
+	copyString(Span(m_dir), Path::getDir(tmp));
 }
 
 

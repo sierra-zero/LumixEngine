@@ -9,7 +9,9 @@
 #include "engine/sync.h"
 #include "engine/os.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #ifdef _WIN32
+	#define WIN32_LEAN_AND_MEAN
 	#include <Windows.h>
 #endif
 #ifdef __linux__
@@ -33,103 +35,71 @@ namespace gpu {
 #undef GPU_GL_IMPORT_TYPEDEFS
 #undef GPU_GL_IMPORT
 
-struct Buffer
-{
-	enum { MAX_COUNT = 8192 };
-	
-	GLuint handle;
-	u32 flags;
+struct Buffer {
+	~Buffer() {
+		if (gl_handle) glDeleteBuffers(1, &gl_handle);
+	}
+
+	GLuint gl_handle;
+	BufferFlags flags;
 };
 
-struct Texture
-{
-	enum { MAX_COUNT = 8192 };
+struct Texture {
+	~Texture() {
+		if (gl_handle) glDeleteTextures(1, &gl_handle);
+	}
 
-	GLuint handle;
+	GLuint gl_handle = 0;
 	GLenum target;
 	GLenum format;
 	u32 width;
 	u32 height;
 	u32 depth;
-	u32 flags;
+	TextureFlags flags;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> name;
+	#endif
 };
 
+struct Program {
+	~Program() {
+		if(gl_handle) glDeleteProgram(gl_handle);
+	}
 
-struct Program
-{
-	enum { MAX_COUNT = 2048 };
-	GLuint handle;
+	GLuint gl_handle = 0;
 	VertexDecl decl;
-};
-
-
-template <typename T, u32 MAX_COUNT>
-struct Pool
-{
-	void init()
-	{
-		values = (T*)mem;
-		for (int i = 0; i < MAX_COUNT; ++i) {
-			new (NewPlaceholder(), &values[i]) int(i + 1);
-		}
-		new (NewPlaceholder(), &values[MAX_COUNT - 1]) int(-1);
-		first_free = 0;
-	}
-
-	int alloc()
-	{
-		if(first_free == -1) return -1;
-
-		const int id = first_free;
-		first_free = *((int*)&values[id]);
-		new (NewPlaceholder(), &values[id]) T;
-		return id;
-	}
-
-	void dealloc(u32 idx)
-	{
-		values[idx].~T();
-		new (NewPlaceholder(), &values[idx]) int(first_free);
-		first_free = idx;
-	}
-
-	alignas(T) u8 mem[sizeof(T) * MAX_COUNT];
-	T* values;
-	int first_free;
-
-	T& operator[](int idx) { return values[idx]; }
-	bool isFull() const { return first_free == -1; }
 };
 
 struct WindowContext {
 	u32 last_frame;
 	void* window_handle = nullptr;
 	GLuint vao;
-#ifdef _WIN32
-	HDC device_context;
-	HGLRC hglrc;
-#endif
+	#ifdef _WIN32
+		HDC device_context;
+		HGLRC hglrc;
+	#endif
 };
 
-static struct {
+struct GL {
+	GL(IAllocator& allocator) : allocator(allocator) {}
+
+	IAllocator& allocator;
 	u32 frame = 0;
 	RENDERDOC_API_1_0_2* rdoc_api;
-	IAllocator* allocator;
 	WindowContext contexts[64];
-	Pool<Buffer, Buffer::MAX_COUNT> buffers;
-	Pool<Texture, Texture::MAX_COUNT> textures;
-	Pool<Program, Program::MAX_COUNT> programs;
-	Mutex handle_mutex;
-	Lumix::OS::ThreadID thread;
+	Lumix::os::ThreadID thread;
 	int instance_attributes = 0;
 	int max_vertex_attributes = 16;
 	ProgramHandle last_program = INVALID_PROGRAM;
-	u64 last_state = 0;
+	StateFlags last_state = StateFlags::NONE;
 	GLuint framebuffer = 0;
-	ProgramHandle default_program;
+	GLuint helper_indirect_buffer = 0;
+	ProgramHandle default_program = INVALID_PROGRAM;
 	bool has_gpu_mem_info_ext = false;
-} g_gpu;
+	float max_anisotropy = 0;
+};
 
+Local<GL> gl;
 
 namespace DDS
 {
@@ -218,25 +188,25 @@ static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hd
 
 void checkThread()
 {
-	ASSERT(g_gpu.thread == OS::getCurrentThreadID());
+	ASSERT(gl->thread == os::getCurrentThreadID());
 }
 
 void launchRenderDoc() {
-	if (g_gpu.rdoc_api) {
-		g_gpu.rdoc_api->LaunchReplayUI(1, "");
+	if (gl->rdoc_api) {
+		gl->rdoc_api->LaunchReplayUI(1, "");
 	}
 }
 
 static void try_load_renderdoc()
 {
 	#ifdef _WIN32
-		void* lib = OS::loadLibrary("renderdoc.dll");
-		if (!lib) lib = OS::loadLibrary("C:\\Program Files\\RenderDoc\\renderdoc.dll");
+		void* lib = os::loadLibrary("renderdoc.dll");
+		if (!lib) lib = os::loadLibrary("C:\\Program Files\\RenderDoc\\renderdoc.dll");
 		if (!lib) return;
-		pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)OS::getLibrarySymbol(lib, "RENDERDOC_GetAPI");
+		pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)os::getLibrarySymbol(lib, "RENDERDOC_GetAPI");
 		if (RENDERDOC_GetAPI) {
-			RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_0_2, (void **)&g_gpu.rdoc_api);
-			g_gpu.rdoc_api->MaskOverlayBits(~RENDERDOC_OverlayBits::eRENDERDOC_Overlay_Enabled, 0);
+			RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_0_2, (void **)&gl->rdoc_api);
+			gl->rdoc_api->MaskOverlayBits(~RENDERDOC_OverlayBits::eRENDERDOC_Overlay_Enabled, 0);
 		}
 		/**/
 		//FreeLibrary(lib);
@@ -248,9 +218,9 @@ static void logVersion() {
 	const char* vendor = (const char*)glGetString(GL_VENDOR);
 	const char* renderer = (const char*)glGetString(GL_RENDERER);
 	if (version) {
-		logInfo("Renderer") << "OpenGL version: " << version;
-		logInfo("Renderer") << "OpenGL vendor: " << vendor;
-		logInfo("Renderer") << "OpenGL renderer: " << renderer;
+		logInfo("OpenGL version: ", version);
+		logInfo("OpenGL vendor: ", vendor);
+		logInfo("OpenGL renderer: ", renderer);
 	}
 }
 
@@ -354,7 +324,7 @@ static bool load_gl_linux(void* wnd){
 		do { \
 			name = (prototype)getGLFunc(#name); \
 			if (!name) { \
-				logError("Renderer") << "Failed to load GL function " #name "."; \
+				logError("Failed to load GL function " #name "."); \
 				return false; \
 			} \
 		} while(0)
@@ -369,10 +339,10 @@ static bool load_gl_linux(void* wnd){
 }
 #endif
 
-static bool load_gl(void* platform_handle, u32 init_flags)
+static bool load_gl(void* platform_handle, InitFlags init_flags)
 {
 	#ifdef _WIN32
-		const bool vsync = init_flags & (u32)InitFlags::VSYNC;
+		const bool vsync = u32(init_flags & InitFlags::VSYNC);
 		HDC hdc = (HDC)platform_handle;
 		const PIXELFORMATDESCRIPTOR pfd =
 		{
@@ -432,23 +402,23 @@ static bool load_gl(void* platform_handle, u32 init_flags)
 		}
 		else {
 			DWORD err = GetLastError();
-			logError("Renderer") << "wglCreateContextAttribsARB failed, GetLastError() = " << (u32) err; 
-			logError("Renderer") << "OpenGL 4.5+ required";
+			logError("wglCreateContextAttribsARB failed, GetLastError() = ", (u32) err); 
+			logError("OpenGL 4.5+ required");
 			logVersion();
 			return false;
 		}
 		logVersion();
-		g_gpu.contexts[0].hglrc = hglrc;
+		gl->contexts[0].hglrc = hglrc;
 		wglSwapIntervalEXT(vsync ? 1 : 0);
-		void* gl_dll = OS::loadLibrary("opengl32.dll");
+		void* gl_dll = os::loadLibrary("opengl32.dll");
 
 		#define GPU_GL_IMPORT(prototype, name) \
 			do { \
 				name = (prototype)getGLFunc(#name); \
 				if (!name && gl_dll) { \
-					name = (prototype)OS::getLibrarySymbol(gl_dll, #name); \
+					name = (prototype)os::getLibrarySymbol(gl_dll, #name); \
 					if (!name) { \
-						logError("Renderer") << "Failed to load GL function " #name "."; \
+						logError("Failed to load GL function " #name "."); \
 						return false; \
 					} \
 				} \
@@ -552,33 +522,31 @@ void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z)
 	glDispatchCompute(num_groups_x, num_groups_y, num_groups_z);
 }
 
-void useProgram(ProgramHandle handle)
+void useProgram(ProgramHandle program)
 {
-	const Program& prg = g_gpu.programs.values[handle.value];
-	const u32 prev = g_gpu.last_program.value;
-	if (prev != handle.value) {
-		g_gpu.last_program = handle;
-		if (!handle.isValid()) {
-			glUseProgram(0);
+	const Program* prev = gl->last_program;
+	if (prev != program) {
+		gl->last_program = program;
+		if (program) {
+			glUseProgram(program->gl_handle);
+
+			if (!prev || program->decl.hash != prev->decl.hash) {
+				setVAO(program->decl);
+			}
 		}
 		else {
-			if (!prg.handle) {
-				glUseProgram(g_gpu.programs[g_gpu.default_program.value].handle);
-			}
-			else {
-				glUseProgram(prg.handle);
-			}
-
-			if (prev == 0xffFFffFF || g_gpu.programs.values[handle.value].decl.hash != g_gpu.programs.values[prev].decl.hash) {
-				setVAO(prg.decl);
-			}
+			glUseProgram(0);
 		}
 	}
 }
 
 void bindImageTexture(TextureHandle texture, u32 unit) {
-	Texture& t = g_gpu.textures[texture.value];
-	glBindImageTexture(unit, t.handle, 0, GL_TRUE, 0, GL_READ_WRITE, t.format);
+	if (texture) {
+		glBindImageTexture(unit, texture->gl_handle, 0, GL_TRUE, 0, GL_READ_WRITE, texture->format);
+	}
+	else {
+		glBindImageTexture(unit, 0, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA8);
+	}
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count)
@@ -588,8 +556,8 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count)
 	ASSERT(handles);
 	
 	for(u32 i = 0; i < count; ++i) {
-		if (handles[i].isValid()) {
-			gl_handles[i] = g_gpu.textures[handles[i].value].handle;
+		if (handles[i]) {
+			gl_handles[i] = handles[i]->gl_handle;
 		}
 		else {
 			gl_handles[i] = 0;
@@ -599,51 +567,39 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count)
 	glBindTextures(offset, count, gl_handles);
 }
 
-void bindShaderBuffer(BufferHandle handle, u32 binding_idx, u32 flags)
+void bindShaderBuffer(BufferHandle buffer, u32 binding_idx, BindShaderBufferFlags flags)
 {
 	checkThread();
-	if(handle.isValid()) {
-		const Buffer& buffer = g_gpu.buffers[handle.value];
-		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding_idx, buffer.handle);
-	}
-	else {
-		glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding_idx, 0, 0, 0);
-	}
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding_idx, buffer ? buffer->gl_handle : 0);
 }
 
-void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_offset) {
+void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride) {
 	checkThread();
 	ASSERT(binding_idx < 2);
-	if(buffer.isValid()) {
-		const GLuint gl_handle = g_gpu.buffers[buffer.value].handle;
-		glBindVertexBuffer(binding_idx, gl_handle, buffer_offset, stride_offset);
-	}
-	else {
-		glBindVertexBuffer(binding_idx, 0, 0, 0);
-	}
+	glBindVertexBuffer(binding_idx, buffer ? buffer->gl_handle : 0, buffer_offset, stride);
 }
 
 
-void setState(u64 state)
+void setState(StateFlags state)
 {
 	checkThread();
 	
-	if(state == g_gpu.last_state) return;
-	g_gpu.last_state = state;
+	if(state == gl->last_state) return;
+	gl->last_state = state;
 
-	if (state & u64(StateFlags::DEPTH_TEST)) glEnable(GL_DEPTH_TEST);
+	if (u64(state & StateFlags::DEPTH_TEST)) glEnable(GL_DEPTH_TEST);
 	else glDisable(GL_DEPTH_TEST);
 	
-	glDepthMask((state & u64(StateFlags::DEPTH_WRITE)) != 0);
+	glDepthMask(u64(state & StateFlags::DEPTH_WRITE) != 0);
 	
-	if (state & u64(StateFlags::SCISSOR_TEST)) glEnable(GL_SCISSOR_TEST);
+	if (u64(state & StateFlags::SCISSOR_TEST)) glEnable(GL_SCISSOR_TEST);
 	else glDisable(GL_SCISSOR_TEST);
 	
-	if (state & u64(StateFlags::CULL_BACK)) {
+	if (u64(state & StateFlags::CULL_BACK)) {
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_BACK);
 	}
-	else if(state & u64(StateFlags::CULL_FRONT)) {
+	else if(u64(state & StateFlags::CULL_FRONT)) {
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_FRONT);
 	}
@@ -651,7 +607,7 @@ void setState(u64 state)
 		glDisable(GL_CULL_FACE);
 	}
 
-	glPolygonMode(GL_FRONT_AND_BACK, state & u64(StateFlags::WIREFRAME) ? GL_LINE : GL_FILL);
+	glPolygonMode(GL_FRONT_AND_BACK, u64(state & StateFlags::WIREFRAME) ? GL_LINE : GL_FILL);
 
 	auto to_gl = [&](BlendFactors factor) -> GLenum{
 		static const GLenum table[] = {
@@ -673,7 +629,7 @@ void setState(u64 state)
 		return table[(int)factor];
 	};
 
-	u16 blend_bits = u16(state >> 6);
+	u16 blend_bits = u16(u64(state) >> 6);
 
 	if (blend_bits) {
 		const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
@@ -687,14 +643,14 @@ void setState(u64 state)
 		glDisable(GL_BLEND);
 	}
 	
-	glStencilMask(u8(state >> 22));
-	const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
+	glStencilMask(u8(u64(state) >> 22));
+	const StencilFuncs func = (StencilFuncs)((u64(state) >> 30) & 0xf);
 	if (func == StencilFuncs::DISABLE) {
 		glDisable(GL_STENCIL_TEST);
 	}
 	else {
-		const u8 ref = u8(state >> 34);
-		const u8 mask = u8(state >> 42);
+		const u8 ref = u8(u64(state) >> 34);
+		const u8 mask = u8(u64(state) >> 42);
 		glEnable(GL_STENCIL_TEST);
 		GLenum gl_func;
 		switch(func) {
@@ -717,41 +673,29 @@ void setState(u64 state)
 			};
 			return table[(int)op];
 		};
-		const StencilOps sfail = StencilOps((state >> 50) & 0xf);
-		const StencilOps zfail = StencilOps((state >> 54) & 0xf);
-		const StencilOps zpass = StencilOps((state >> 58) & 0xf);
+		const StencilOps sfail = StencilOps((u64(state) >> 50) & 0xf);
+		const StencilOps zfail = StencilOps((u64(state) >> 54) & 0xf);
+		const StencilOps zpass = StencilOps((u64(state) >> 58) & 0xf);
 		glStencilOp(toGLOp(sfail), toGLOp(zfail), toGLOp(zpass));
 	}
 }
 
 
-void bindIndexBuffer(BufferHandle handle)
+void bindIndexBuffer(BufferHandle buffer)
 {
 	checkThread();
-	if(handle.isValid()) {	
-		const GLuint ib = g_gpu.buffers[handle.value].handle;
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
-		return;
-	}
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer ? buffer->gl_handle : 0);
 }
 
 
-void bindIndirectBuffer(BufferHandle handle)
+void bindIndirectBuffer(BufferHandle buffer)
 {
 	checkThread();
-	if(handle.isValid()) {	
-		const GLuint ib = g_gpu.buffers[handle.value].handle;
-		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ib);
-		return;
-	}
-
-	glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+	glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffer ? buffer->gl_handle : 0);
 }
 
 
-void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType type)
+void drawElements(PrimitiveType primitive_type, u32 offset, u32 count, DataType type)
 {
 	checkThread();
 	
@@ -784,7 +728,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 {
 	checkThread();
 	const GLenum type = index_type == DataType::U16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-	/*if (instances_count * indices_count > 4096) {
+	if (instances_count * indices_count > 4096) {
 		struct {
 			u32  indices_count;
 			u32  instances_count;
@@ -799,20 +743,22 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 		mdi.base_vertex = 0;
 		// we use glMultiDrawElementsIndirect because of 
 		// https://devtalk.nvidia.com/default/topic/1052728/opengl/extremely-slow-gldrawelementsinstanced-compared-to-gldrawarraysinstanced-/
-		glMultiDrawElementsIndirect(GL_TRIANGLES, type, &mdi, 1, 0);
+		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, gl->helper_indirect_buffer);
+		glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, sizeof(mdi), &mdi);
+		glMultiDrawElementsIndirect(GL_TRIANGLES, type, nullptr, 1, 0);
 	}
-	else*/ {
+	else {
 		glDrawElementsInstanced(GL_TRIANGLES, indices_count, type, 0, instances_count);
 	}
 }
 
 
-void drawTriangles(u32 indices_count, DataType index_type)
+void drawTriangles(u32 indices_byte_offset, u32 indices_count, DataType index_type)
 {
 	checkThread();
 
 	const GLenum type = index_type == DataType::U16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-	glDrawElements(GL_TRIANGLES, indices_count, type, 0);
+	glDrawElements(GL_TRIANGLES, indices_count, type, (const GLvoid*)(uintptr_t)indices_byte_offset);
 }
 
 
@@ -822,7 +768,7 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count)
 }
 
 
-void drawArrays(u32 offset, u32 count, PrimitiveType type)
+void drawArrays(PrimitiveType type, u32 offset, u32 count)
 {
 	checkThread();
 	
@@ -840,64 +786,59 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type)
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
 	checkThread();
-	if (buffer.isValid()) {
-		const GLuint buf = g_gpu.buffers[buffer.value].handle;
-		glBindBufferRange(GL_UNIFORM_BUFFER, index, buf, offset, size);
-		return;
-	}
-	glBindBufferRange(GL_UNIFORM_BUFFER, index, 0, 0, size);
+	glBindBufferRange(GL_UNIFORM_BUFFER, index, buffer ? buffer->gl_handle : 0, offset, size);
 }
 
 
 void* map(BufferHandle buffer, size_t size)
 {
 	checkThread();
-	const Buffer& b = g_gpu.buffers[buffer.value];
-	ASSERT((b.flags & (u32)BufferFlags::IMMUTABLE) == 0);
+	ASSERT(buffer);
+	ASSERT(u32(buffer->flags & BufferFlags::IMMUTABLE) == 0);
 	const GLbitfield gl_flags = GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_WRITE_BIT;
-	return glMapNamedBufferRange(b.handle, 0, size, gl_flags);
+	return glMapNamedBufferRange(buffer->gl_handle, 0, size, gl_flags);
 }
 
 
 void unmap(BufferHandle buffer)
 {
 	checkThread();
-	const GLuint buf = g_gpu.buffers[buffer.value].handle;
-	glUnmapNamedBuffer(buf);
+	ASSERT(buffer);
+	glUnmapNamedBuffer(buffer->gl_handle);
 }
 
 
 void update(BufferHandle buffer, const void* data, size_t size)
 {
 	checkThread();
-	const Buffer& b = g_gpu.buffers[buffer.value];
-	ASSERT((b.flags & (u32)BufferFlags::IMMUTABLE) == 0);
-	const GLuint buf = b.handle;
+	ASSERT(buffer);
+	ASSERT(u32(buffer->flags & BufferFlags::IMMUTABLE) == 0);
+	const GLuint buf = buffer->gl_handle;
 	glNamedBufferSubData(buf, 0, size, data);
 }
 
 void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size)
 {
 	checkThread();
-	const Buffer& bsrc = g_gpu.buffers[src.value];
-	const Buffer& bdst = g_gpu.buffers[dst.value];
-	ASSERT((bdst.flags & (u32)BufferFlags::IMMUTABLE) == 0);
+	ASSERT(src);
+	ASSERT(dst);
+	ASSERT(u32(dst->flags & BufferFlags::IMMUTABLE) == 0);
 
-	glCopyNamedBufferSubData(bsrc.handle, bdst.handle, 0, dst_offset, size);
+	glCopyNamedBufferSubData(src->gl_handle, dst->gl_handle, 0, dst_offset, size);
 }
 
 void startCapture()
 {
-	if (g_gpu.rdoc_api) {
-		g_gpu.rdoc_api->StartFrameCapture(nullptr, nullptr);
+	if (gl->rdoc_api) {
+		gl->rdoc_api->StartFrameCapture(nullptr, nullptr);
 	}
 }
 
 
 void stopCapture()
 {
-	if (g_gpu.rdoc_api) {
-		g_gpu.rdoc_api->EndFrameCapture(nullptr, nullptr);
+	if (gl->rdoc_api) {
+		gl->rdoc_api->EndFrameCapture(nullptr, nullptr);
 	}
 }
 
@@ -905,11 +846,11 @@ static void gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum seve
 {
 	if(GL_DEBUG_TYPE_PUSH_GROUP == type || type == GL_DEBUG_TYPE_POP_GROUP) return;
 	if (type == GL_DEBUG_TYPE_ERROR) {
-		logError("GL") << message;
+		logError(message);
 		//ASSERT(false);
 	}
 	else if (type == GL_DEBUG_TYPE_PERFORMANCE) {
-		logInfo("GL") << message;
+		logInfo(message);
 	}
 	else {
 		//logInfo("GL") << message;
@@ -921,13 +862,13 @@ void setCurrentWindow(void* window_handle) {
 
 	#ifdef _WIN32
 		WindowContext& ctx = [window_handle]() -> WindowContext& {
-			if (!window_handle) return g_gpu.contexts[0];
+			if (!window_handle) return gl->contexts[0];
 
-			for (WindowContext& i : g_gpu.contexts) {
+			for (WindowContext& i : gl->contexts) {
 				if (i.window_handle == window_handle) return i;
 			}
 
-			for (WindowContext& i : g_gpu.contexts) {
+			for (WindowContext& i : gl->contexts) {
 				if (!i.window_handle) {
 					i.window_handle = window_handle;
 					i.device_context = GetDC((HWND)window_handle);
@@ -936,10 +877,10 @@ void setCurrentWindow(void* window_handle) {
 				}
 			}
 			LUMIX_FATAL(false);
-			return g_gpu.contexts[0];
+			return gl->contexts[0];
 		}();
 
-		ctx.last_frame = g_gpu.frame;
+		ctx.last_frame = gl->frame;
 
 		if (!ctx.hglrc) {
 			const HDC hdc = ctx.device_context;
@@ -966,7 +907,7 @@ void setCurrentWindow(void* window_handle) {
 			BOOL pf_status = SetPixelFormat(hdc, pf, &pfd);
 			ASSERT(pf_status == TRUE);
 
-			wglMakeCurrent(hdc, g_gpu.contexts[0].hglrc);
+			wglMakeCurrent(hdc, gl->contexts[0].hglrc);
 
 			typedef BOOL (WINAPI * PFNWGLSWAPINTERVALEXTPROC) (int interval);
 			typedef HGLRC (WINAPI * PFNWGLCREATECONTEXTATTRIBSARBPROC) (HDC hDC, HGLRC hShareContext, const int *attribList);
@@ -994,7 +935,7 @@ void setCurrentWindow(void* window_handle) {
 			};
 
 			// TODO destroy context when window is destroyed
-			HGLRC hglrc = wglCreateContextAttribsARB(hdc, g_gpu.contexts[0].hglrc, contextAttrs);
+			HGLRC hglrc = wglCreateContextAttribsARB(hdc, gl->contexts[0].hglrc, contextAttrs);
 			ctx.hglrc = hglrc;
 			wglMakeCurrent(ctx.device_context, hglrc);
 			glGenVertexArrays(1, &ctx.vao);
@@ -1020,11 +961,10 @@ void setCurrentWindow(void* window_handle) {
 u32 swapBuffers()
 {
 	checkThread();
-	glFinish();
 	#ifdef _WIN32
-		for (WindowContext& ctx : g_gpu.contexts) {
+		for (WindowContext& ctx : gl->contexts) {
 			if (!ctx.window_handle) continue;
-			if (g_gpu.frame == ctx.last_frame || &ctx == g_gpu.contexts) {
+			if (gl->frame == ctx.last_frame || &ctx == gl->contexts) {
 				SwapBuffers(ctx.device_context);
 			}
 			else {
@@ -1039,65 +979,66 @@ u32 swapBuffers()
 				ASSERT(res);
 			}
 		}
-		BOOL res = wglMakeCurrent(g_gpu.contexts[0].device_context, g_gpu.contexts[0].hglrc);
+		BOOL res = wglMakeCurrent(gl->contexts[0].device_context, gl->contexts[0].hglrc);
 		ASSERT(res);
 	#else
-		glXSwapBuffers(gdisplay, (Window)g_gpu.contexts[0].window_handle);
+		glXSwapBuffers(gdisplay, (Window)gl->contexts[0].window_handle);
 	#endif
-	++g_gpu.frame;
+	++gl->frame;
 	return 0;
 }
 
+bool frameFinished(u32 frame) { return true; }
 void waitFrame(u32 frame) {}
 
-void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
+void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const void* data)
 {
 	checkThread();
+	ASSERT(buffer);
 	GLuint buf;
 	glCreateBuffers(1, &buf);
 	
 	GLbitfield gl_flags = 0;
-	if ((flags & (u32)BufferFlags::IMMUTABLE) == 0) gl_flags |= GL_DYNAMIC_STORAGE_BIT | GL_MAP_WRITE_BIT | GL_MAP_READ_BIT;
+	if (u64(flags & BufferFlags::IMMUTABLE) == 0) gl_flags |= GL_DYNAMIC_STORAGE_BIT | GL_MAP_WRITE_BIT | GL_MAP_READ_BIT;
 	glNamedBufferStorage(buf, size, data, gl_flags);
 
-	g_gpu.buffers[buffer.value].handle = buf;
-	g_gpu.buffers[buffer.value].flags = flags;
+	buffer->gl_handle = buf;
+	buffer->flags = flags;
 }
 
 void destroy(ProgramHandle program)
 {
 	checkThread();
-	
-	Program& p = g_gpu.programs[program.value];
-	const GLuint handle = p.handle;
-	glDeleteProgram(handle);
-
-	MutexGuard lock(g_gpu.handle_mutex);
-	g_gpu.programs.dealloc(program.value);
+	LUMIX_DELETE(gl->allocator, program);
 }
 
 static struct {
+	bool is_compressed;
 	TextureFormat format;
 	GLenum gl_internal;
 	GLenum gl_format;
 	GLenum type;
 } s_texture_formats[] =
 { 
-	{TextureFormat::D24, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT},
-	{TextureFormat::D24S8, GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8},
-	{TextureFormat::D32, GL_DEPTH_COMPONENT32, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT},
+	{ false, TextureFormat::D24, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT},
+	{ false, TextureFormat::D24S8, GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8},
+	{ false, TextureFormat::D32, GL_DEPTH_COMPONENT32, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT},
 	
-	{TextureFormat::SRGB, GL_SRGB8, GL_RGBA, GL_UNSIGNED_BYTE},
-	{TextureFormat::SRGBA, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE},
-	{TextureFormat::RGBA8, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE},
-	{TextureFormat::RGBA16, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},
-	{TextureFormat::RGBA16F, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},
-	{TextureFormat::RGBA32F, GL_RGBA32F, GL_RGBA, GL_FLOAT},
-	{TextureFormat::R16F, GL_R16F, GL_RED, GL_HALF_FLOAT},
-	{TextureFormat::R8, GL_R8, GL_RED, GL_UNSIGNED_BYTE},
-	{TextureFormat::R16, GL_R16, GL_RED, GL_UNSIGNED_SHORT},
-	{TextureFormat::R32F, GL_R32F, GL_RED, GL_FLOAT},
-	{TextureFormat::RG32F, GL_RG32F, GL_RG, GL_FLOAT}
+	{ false, TextureFormat::SRGB, GL_SRGB8, GL_RGBA, GL_UNSIGNED_BYTE},
+	{ false, TextureFormat::SRGBA, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE},
+	{ false, TextureFormat::RGBA8, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE},
+	{ false, TextureFormat::RGBA16, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},
+	{ false, TextureFormat::RGBA16F, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},
+	{ false, TextureFormat::RGBA32F, GL_RGBA32F, GL_RGBA, GL_FLOAT},
+	{ false, TextureFormat::R16F, GL_R16F, GL_RED, GL_HALF_FLOAT},
+	{ false, TextureFormat::R8, GL_R8, GL_RED, GL_UNSIGNED_BYTE},
+	{ false, TextureFormat::RG8, GL_RG8, GL_RG, GL_UNSIGNED_BYTE},
+	{ false, TextureFormat::R16, GL_R16, GL_RED, GL_UNSIGNED_SHORT},
+	{ false, TextureFormat::R32F, GL_R32F, GL_RED, GL_FLOAT},
+	{ false, TextureFormat::RG32F, GL_RG32F, GL_RG, GL_FLOAT},
+	{ true, TextureFormat::BC1, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT},
+	{ true, TextureFormat::BC2, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT},
+	{ true, TextureFormat::BC3, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT}
 };
 
 
@@ -1126,14 +1067,15 @@ TextureInfo getTextureInfo(const void* data)
 
 void update(TextureHandle texture, u32 level, u32 slice, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf)
 {
+	ASSERT(texture);
 	checkThread();
-	Texture& t = g_gpu.textures[texture.value];
-	const GLuint handle = t.handle;
+	const GLuint handle = texture->gl_handle;
 	for (int i = 0; i < sizeof(s_texture_formats) / sizeof(s_texture_formats[0]); ++i) {
 		if (s_texture_formats[i].format == format) {
+			ASSERT(!s_texture_formats[i].is_compressed);
 			const auto& f = s_texture_formats[i];
 			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-			if (t.flags & (u32)TextureFlags::IS_CUBE || t.depth > 1) {
+			if (u32(texture->flags & TextureFlags::IS_CUBE) || texture->depth > 1) {
 				glTextureSubImage3D(handle, level, x, y, slice, w, h, 1, f.gl_format, f.type, buf);
 			}
 			else {
@@ -1145,94 +1087,22 @@ void update(TextureHandle texture, u32 level, u32 slice, u32 x, u32 y, u32 w, u3
 	}
 }
 
-
-bool loadTexture(TextureHandle handle, const void* input, int input_size, u32 flags, const char* debug_name)
+static bool upload(GLuint texture
+	, u32 layer_offset
+	, u32 layers
+	, const DDS::Header& hdr
+	, DDS::LoadInfo* li
+	, bool is_srgb
+	, InputMemoryStream& blob
+	, const char* debug_name)
 {
-	ASSERT(debug_name && debug_name[0]);
-	checkThread();
-	DDS::Header hdr;
-
-	InputMemoryStream blob(input, input_size);
-	blob.read(&hdr, sizeof(hdr));
-
-	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
-		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
-	{
-		logError("renderer") << "Wrong dds format or corrupted dds (" << debug_name << ")";
-		return false;
-	}
-
-	DDS::LoadInfo* li;
-	int layers = 1;
-	bool is_dds10 = false;
-
-	if (isDXT1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT1;
-	}
-	else if (isDXT3(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT3;
-	}
-	else if (isDXT5(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT5;
-	}
-	else if (isATI1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI1;
-	}
-	else if (isATI2(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI2;
-	}
-	else if (isBGRA8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGRA8;
-	}
-	else if (isBGR8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR8;
-	}
-	else if (isBGR5A1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR5A1;
-	}
-	else if (isBGR565(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR565;
-	}
-	else if (isINDEX8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoIndex8;
-	}
-	else if (isDXT10(hdr.pixelFormat)) {
-		DDS::DXT10Header dxt10_hdr;
-		blob.read(dxt10_hdr);
-		is_dds10 = true;
-		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
-		layers = dxt10_hdr.array_size;
-	}
-	else {
-		ASSERT(false);
-		return false;
-	}
-
 	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-
-	const GLenum texture_target = is_cubemap ? GL_TEXTURE_CUBE_MAP : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const GLenum internal_format = is_srgb ? li->internalSRGBFormat : li->internalFormat;
+	const bool is_dds10 = isDXT10(hdr.pixelFormat);
 	const u32 mipMapCount = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
+	OutputMemoryStream unpacked(gl->allocator);
 
-	GLuint texture;
-	glCreateTextures(texture_target, 1, &texture);
-	if (texture == 0) {
-		return false;
-	}
-	if(layers > 1) {
-		glTextureStorage3D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight, layers);
-	}
-	else {
-		glTextureStorage2D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight);
-	}
-	if (debug_name && debug_name[0]) {
-		glObjectLabel(GL_TEXTURE, texture, stringLength(debug_name), debug_name);
-	}
-
-	OutputMemoryStream unpacked(*g_gpu.allocator);
-
-	for (int layer = 0; layer < layers; ++layer) {
+	for (u32 layer = layer_offset; layer < layer_offset + layers; ++layer) {
 		for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
 			u32 width = hdr.dwWidth;
 			u32 height = hdr.dwHeight;
@@ -1240,18 +1110,13 @@ bool loadTexture(TextureHandle handle, const void* input, int input_size, u32 fl
 			if (li->compressed) {
 				u32 size = DDS::sizeDXTC(width, height, internal_format);
 				if (!is_dds10 && !is_cubemap && (size != hdr.dwPitchOrLinearSize || (hdr.dwFlags & DDS::DDSD_LINEARSIZE) == 0)) {
-					logError("Renderer") << "Unsupported format " << debug_name;
-					glDeleteTextures(1, &texture);
+					logError("Unsupported format ", debug_name);
 					return false;
 				}
 				for (u32 mip = 0; mip < mipMapCount; ++mip) {
 					const u8* data_ptr = (u8*)blob.skip(size);
-					if(layers > 1) {
-						glCompressedTextureSubImage3D(texture, mip, 0, 0, layer, width, height, 1, internal_format, size, data_ptr);
-					}
-					else if (is_cubemap) {
-						ASSERT(layer == 0);
-						glCompressedTextureSubImage3D(texture, mip, 0, 0, side, width, height, 1, internal_format, size, data_ptr);
+					if (is_cubemap || layers > 1) {
+						glCompressedTextureSubImage3D(texture, mip, 0, 0, side + layer * (is_cubemap ? 6 : 1), width, height, 1, internal_format, size, data_ptr);
 					}
 					else {
 						glCompressedTextureSubImage2D(texture, mip, 0, 0, width, height, internal_format, size, data_ptr);
@@ -1316,17 +1181,180 @@ bool loadTexture(TextureHandle handle, const void* input, int input_size, u32 fl
 			glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1);
 		}
 	}
+	return true;
+}
 
-	const GLint wrap_u = (flags & (u32)TextureFlags::CLAMP_U) ? GL_CLAMP : GL_REPEAT;
-	const GLint wrap_v = (flags & (u32)TextureFlags::CLAMP_V) ? GL_CLAMP : GL_REPEAT;
-	const GLint wrap_w = (flags & (u32)TextureFlags::CLAMP_W) ? GL_CLAMP : GL_REPEAT;
+
+bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int size, const char* debug_name)
+{
+	ASSERT(handle);
+	ASSERT(handle->gl_handle != 0); // call createTexture before
+	ASSERT(debug_name && debug_name[0]);
+	checkThread();
+	DDS::Header hdr;
+
+	InputMemoryStream blob(data, size);
+	blob.read(&hdr, sizeof(hdr));
+
+	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
+		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
+	{
+		logError("Wrong dds format or corrupted dds (", debug_name, ")");
+		return false;
+	}
+
+	DDS::LoadInfo* li;
+	int layers = 1;
+	bool is_dds10 = false;
+
+	if (isDXT1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT1;
+	}
+	else if (isDXT3(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT3;
+	}
+	else if (isDXT5(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT5;
+	}
+	else if (isATI1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoATI1;
+	}
+	else if (isATI2(hdr.pixelFormat)) {
+		li = &DDS::loadInfoATI2;
+	}
+	else if (isBGRA8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGRA8;
+	}
+	else if (isBGR8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR8;
+	}
+	else if (isBGR5A1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR5A1;
+	}
+	else if (isBGR565(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR565;
+	}
+	else if (isINDEX8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoIndex8;
+	}
+	else if (isDXT10(hdr.pixelFormat)) {
+		DDS::DXT10Header dxt10_hdr;
+		blob.read(dxt10_hdr);
+		is_dds10 = true;
+		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
+		layers = dxt10_hdr.array_size;
+	}
+	else {
+		ASSERT(false);
+		return false;
+	}
+
+	const bool is_srgb = u32(handle->flags & TextureFlags::SRGB);
+
+	return upload(handle->gl_handle, layer_offset, layers, hdr, li, is_srgb, blob, debug_name);
+}
+
+
+bool loadTexture(TextureHandle handle, const void* input, int input_size, TextureFlags flags, const char* debug_name)
+{
+	ASSERT(debug_name && debug_name[0]);
+	ASSERT(handle);
+	checkThread();
+	DDS::Header hdr;
+
+	InputMemoryStream blob(input, input_size);
+	blob.read(&hdr, sizeof(hdr));
+
+	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
+		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
+	{
+		logError("Wrong dds format or corrupted dds (", debug_name, ")");
+		return false;
+	}
+
+	DDS::LoadInfo* li;
+	int layers = 1;
+	bool is_dds10 = false;
+
+	if (isDXT1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT1;
+	}
+	else if (isDXT3(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT3;
+	}
+	else if (isDXT5(hdr.pixelFormat)) {
+		li = &DDS::loadInfoDXT5;
+	}
+	else if (isATI1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoATI1;
+	}
+	else if (isATI2(hdr.pixelFormat)) {
+		li = &DDS::loadInfoATI2;
+	}
+	else if (isBGRA8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGRA8;
+	}
+	else if (isBGR8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR8;
+	}
+	else if (isBGR5A1(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR5A1;
+	}
+	else if (isBGR565(hdr.pixelFormat)) {
+		li = &DDS::loadInfoBGR565;
+	}
+	else if (isINDEX8(hdr.pixelFormat)) {
+		li = &DDS::loadInfoIndex8;
+	}
+	else if (isDXT10(hdr.pixelFormat)) {
+		DDS::DXT10Header dxt10_hdr;
+		blob.read(dxt10_hdr);
+		is_dds10 = true;
+		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
+		layers = dxt10_hdr.array_size;
+	}
+	else {
+		ASSERT(false);
+		return false;
+	}
+
+	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
+	const GLenum texture_target = is_cubemap ? GL_TEXTURE_CUBE_MAP : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
+	const bool is_anisotropic_filter = u32(flags & TextureFlags::ANISOTROPIC_FILTER);
+	const GLenum internal_format = is_srgb ? li->internalSRGBFormat : li->internalFormat;
+	const u32 mipMapCount = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
+
+	GLuint texture;
+	glCreateTextures(texture_target, 1, &texture);
+	if (texture == 0) {
+		return false;
+	}
+	if(layers > 1) {
+		glTextureStorage3D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight, layers);
+	}
+	else {
+		glTextureStorage2D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight);
+	}
+	if (debug_name && debug_name[0]) {
+		glObjectLabel(GL_TEXTURE, texture, stringLength(debug_name), debug_name);
+	}
+
+	if (!upload(texture, 0, layers, hdr, li, is_srgb, blob, debug_name)) return false;
+
+	const GLint wrap_u = u32(flags & TextureFlags::CLAMP_U) ? GL_CLAMP : GL_REPEAT;
+	const GLint wrap_v = u32(flags & TextureFlags::CLAMP_V) ? GL_CLAMP : GL_REPEAT;
+	const GLint wrap_w = u32(flags & TextureFlags::CLAMP_W) ? GL_CLAMP : GL_REPEAT;
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_S, wrap_u);
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_T, wrap_v);
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_R, wrap_w);
+	if (is_anisotropic_filter && gl->max_anisotropy > 0) {
+		glTextureParameterf(texture, GL_TEXTURE_MAX_ANISOTROPY, gl->max_anisotropy); 
+	}
 
-	Texture& t = g_gpu.textures[handle.value];
+	Texture& t = *handle;
 	t.format = internal_format;
-	t.handle = texture;
+	t.gl_handle = texture;
 	t.target = is_cubemap ? GL_TEXTURE_CUBE_MAP : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
 	t.width = hdr.dwWidth;
 	t.height = hdr.dwHeight;
@@ -1338,84 +1366,59 @@ bool loadTexture(TextureHandle handle, const void* input, int input_size, u32 fl
 
 ProgramHandle allocProgramHandle()
 {
-	MutexGuard lock(g_gpu.handle_mutex);
+	Program* p = LUMIX_NEW(gl->allocator, Program)();
 
-	if(g_gpu.programs.isFull()) {
-		logError("Renderer") << "Not enough free program slots.";
-		return INVALID_PROGRAM;
-	}
-	const int id = g_gpu.programs.alloc();
-	if (id < 0) return INVALID_PROGRAM;
-
-	Program& p = g_gpu.programs[id];
-	p.handle = 0;
-	return { (u32)id };
+	p->gl_handle = gl->default_program ? gl->default_program->gl_handle : 0;
+	return p;
 }
 
 
 BufferHandle allocBufferHandle()
 {
-	MutexGuard lock(g_gpu.handle_mutex);
-
-	if(g_gpu.buffers.isFull()) {
-		logError("Renderer") << "Not enough free buffer slots.";
-		return INVALID_BUFFER;
-	}
-	const int id = g_gpu.buffers.alloc();
-	if (id < 0) return INVALID_BUFFER;
-
-	Buffer& t = g_gpu.buffers[id];
-	t.handle = 0;
-	return { (u32)id };
+	Buffer* b = LUMIX_NEW(gl->allocator, Buffer);
+	b->gl_handle = 0;
+	return b;
 }
 
 TextureHandle allocTextureHandle()
 {
-	MutexGuard lock(g_gpu.handle_mutex);
-
-	if(g_gpu.textures.isFull()) {
-		logError("Renderer") << "Not enough free texture slots.";
-		return INVALID_TEXTURE;
-	}
-	const int id = g_gpu.textures.alloc();
-	ASSERT(id >= 0);
-
-	Texture& t = g_gpu.textures[id];
-	t.handle = 0;
-	return { (u32)id };
+	Texture* t = LUMIX_NEW(gl->allocator, Texture);
+	t->gl_handle = 0;
+	return t;
 }
 
 
-void createTextureView(TextureHandle view_handle, TextureHandle orig_handle)
+void createTextureView(TextureHandle view, TextureHandle texture)
 {
 	checkThread();
 	
-	const Texture& orig = g_gpu.textures[orig_handle.value];
-	Texture& view = g_gpu.textures[view_handle.value];
+	ASSERT(texture);
+	ASSERT(view);
 
-	if (view.handle != 0) {
-		glDeleteTextures(1, &view.handle);
+	if (view->gl_handle != 0) {
+		glDeleteTextures(1, &view->gl_handle);
 	}
 
-	view.target = GL_TEXTURE_2D;
-	view.format = orig.format;
+	view->target = GL_TEXTURE_2D;
+	view->format = texture->format;
 
-	glGenTextures(1, &view.handle);
-	glTextureView(view.handle, GL_TEXTURE_2D, orig.handle, orig.format, 0, 1, 0, 1);
-	view.width = orig.width;
-	view.height = orig.height;
+	glGenTextures(1, &view->gl_handle);
+	glTextureView(view->gl_handle, GL_TEXTURE_2D, texture->gl_handle, texture->format, 0, 1, 0, 1);
+	view->width = texture->width;
+	view->height = texture->height;
 }
 
 
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
+bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const void* data, const char* debug_name)
 {
 	checkThread();
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
-	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
-	const bool is_3d = depth > 1 && (flags & (u32)TextureFlags::IS_3D);
-	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
+	ASSERT(handle);
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
+	const bool no_mips = u32(flags & TextureFlags::NO_MIPS);
+	const bool is_3d = depth > 1 && u32(flags & TextureFlags::IS_3D);
+	const bool is_cubemap = u32(flags & TextureFlags::IS_CUBE);
+	const bool is_anisotropic_filter = u32(flags & TextureFlags::ANISOTROPIC_FILTER);
 
-	ASSERT(!is_cubemap || depth == 1);
 	ASSERT(!is_cubemap || !is_3d);
 	ASSERT(!is_cubemap || no_mips || !data);
 	ASSERT(!is_srgb); // use format argument to enable srgb
@@ -1424,7 +1427,13 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	GLuint texture;
 	int found_format = 0;
 	GLenum internal_format = 0;
-	const GLenum target = is_3d ? GL_TEXTURE_3D : (is_cubemap ? GL_TEXTURE_CUBE_MAP : (depth > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
+	GLenum target = GL_TEXTURE_2D; 
+	if (is_3d) target = GL_TEXTURE_3D;
+	else if (is_cubemap && depth <= 1) target = GL_TEXTURE_CUBE_MAP;
+	else if (is_cubemap && depth > 1) target = GL_TEXTURE_CUBE_MAP_ARRAY;
+	else if (depth > 1) target = GL_TEXTURE_2D_ARRAY;
+	else target = GL_TEXTURE_2D;
+
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
 
 	glCreateTextures(target, 1, &texture);
@@ -1434,6 +1443,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			if(depth <= 1) {
 				glTextureStorage2D(texture, mip_count, s_texture_formats[i].gl_internal, w, h);
 				if (data) {
+					ASSERT(!s_texture_formats[i].is_compressed);
 					if (is_cubemap) {
 						for (u32 face = 0; face < 6; ++face) {
 							ASSERT(format == TextureFormat::RGBA32F);
@@ -1464,8 +1474,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 				}
 			}
 			else {
-				glTextureStorage3D(texture, mip_count, s_texture_formats[i].gl_internal, w, h, depth);
+				glTextureStorage3D(texture, mip_count, s_texture_formats[i].gl_internal, w, h, depth * (is_cubemap ? 6 : 1));
 				if (data) {
+					ASSERT(!s_texture_formats[i].is_compressed);
+					ASSERT(!is_cubemap);
 					glTextureSubImage3D(texture
 						, 0
 						, 0
@@ -1497,13 +1509,13 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	}
 	glGenerateTextureMipmap(texture);
 	
-	const GLint wrap_u = (flags & (u32)TextureFlags::CLAMP_U) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
-	const GLint wrap_v = (flags & (u32)TextureFlags::CLAMP_V) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
-	const GLint wrap_w = (flags & (u32)TextureFlags::CLAMP_W) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+	const GLint wrap_u = u32(flags & TextureFlags::CLAMP_U) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+	const GLint wrap_v = u32(flags & TextureFlags::CLAMP_V) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+	const GLint wrap_w = u32(flags & TextureFlags::CLAMP_W) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_S, wrap_u);
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_T, wrap_v);
 	glTextureParameteri(texture, GL_TEXTURE_WRAP_R, wrap_w);
-	if (flags & (u32)TextureFlags::POINT_FILTER) {
+	if (u32(flags & TextureFlags::POINT_FILTER)) {
 		glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	}
@@ -1511,68 +1523,61 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, no_mips ? GL_LINEAR : GL_LINEAR_MIPMAP_LINEAR);
 	}
+	if (is_anisotropic_filter && gl->max_anisotropy > 0) {
+		glTextureParameterf(texture, GL_TEXTURE_MAX_ANISOTROPY, gl->max_anisotropy); 
+	}
 
-	Texture& t = g_gpu.textures[handle.value];
-	t.handle = texture;
-	t.target = target;
-	t.format = internal_format;
-	t.width = w;
-	t.height = h;
-	t.depth = depth;
-	t.flags = flags;
-
+	handle->gl_handle = texture;
+	handle->target = target;
+	handle->format = internal_format;
+	handle->width = w;
+	handle->height = h;
+	handle->depth = depth;
+	handle->flags = flags;
+	#ifdef LUMIX_DEBUG
+		handle->name = debug_name;
+	#endif
 	return true;
 }
 
-void generateMipmaps(TextureHandle handle)
+void generateMipmaps(TextureHandle texture)
 {
-	Texture& t = g_gpu.textures[handle.value];
-	glGenerateTextureMipmap(t.handle);
+	ASSERT(texture);
+	glGenerateTextureMipmap(texture->gl_handle);
 }
 
 void destroy(TextureHandle texture)
 {
 	checkThread();
-	Texture& t = g_gpu.textures[texture.value];
-	const GLuint handle = t.handle;
-	glDeleteTextures(1, &handle);
-
-	MutexGuard lock(g_gpu.handle_mutex);
-	g_gpu.textures.dealloc(texture.value);
+	LUMIX_DELETE(gl->allocator, texture);
 }
 
 void destroy(BufferHandle buffer) {
 	checkThread();
-	
-	Buffer& t = g_gpu.buffers[buffer.value];
-	const GLuint handle = t.handle;
-	glDeleteBuffers(1, &handle);
-
-	MutexGuard lock(g_gpu.handle_mutex);
-	g_gpu.buffers.dealloc(buffer.value);
+	LUMIX_DELETE(gl->allocator, buffer);
 }
 
-void clear(u32 flags, const float* color, float depth)
+void clear(ClearFlags flags, const float* color, float depth)
 {
 	glUseProgram(0);
-	g_gpu.last_program = INVALID_PROGRAM;
+	gl->last_program = INVALID_PROGRAM;
 	glDisable(GL_SCISSOR_TEST);
 	glDisable(GL_BLEND);
-	g_gpu.last_state &= ~u64(0xffFF << 6);
+	gl->last_state = gl->last_state & ~StateFlags(0xffFF << 6);
 	checkThread();
 	GLbitfield gl_flags = 0;
-	if (flags & (u32)ClearFlags::COLOR) {
+	if (u32(flags & ClearFlags::COLOR)) {
 		glClearColor(color[0], color[1], color[2], color[3]);
 		gl_flags |= GL_COLOR_BUFFER_BIT;
 	}
-	if (flags & (u32)ClearFlags::DEPTH) {
+	if (u32(flags & ClearFlags::DEPTH)) {
 		glDepthMask(GL_TRUE);
 		glClearDepth(depth);
 		gl_flags |= GL_DEPTH_BUFFER_BIT;
 	}
-	if (flags & (u32)ClearFlags::STENCIL) {
+	if (u32(flags & ClearFlags::STENCIL)) {
 		glStencilMask(0xff);
-		g_gpu.last_state = g_gpu.last_state | (0xff << 22);
+		gl->last_state = gl->last_state | StateFlags(0xff << 22);
 		glClearStencil(0);
 		gl_flags |= GL_STENCIL_BUFFER_BIT;
 	}
@@ -1615,7 +1620,7 @@ bool createProgram(ProgramHandle prog, const VertexDecl& decl, const char** srcs
 	enum { MAX_SHADERS_PER_PROGRAM = 16 };
 
 	if (num > MAX_SHADERS_PER_PROGRAM) {
-		logError("Renderer") << "Too many shaders per program in " << name;
+		logError("Too many shaders per program in ", name);
 		return false;
 	}
 
@@ -1681,13 +1686,13 @@ bool createProgram(ProgramHandle prog, const VertexDecl& decl, const char** srcs
 			GLint log_len = 0;
 			glGetShaderiv(shd, GL_INFO_LOG_LENGTH, &log_len);
 			if (log_len > 0) {
-				Array<char> log_buf(*g_gpu.allocator);
+				Array<char> log_buf(gl->allocator);
 				log_buf.resize(log_len);
 				glGetShaderInfoLog(shd, log_len, &log_len, &log_buf[0]);
-				logError("Renderer") << name << " - " << shaderTypeToString(types[i]) << ": " << &log_buf[0];
+				logError(name, " - ", shaderTypeToString(types[i]), ": ", &log_buf[0]);
 			}
 			else {
-				logError("Renderer") << "Failed to compile shader " << name << " - " << shaderTypeToString(types[i]);
+				logError("Failed to compile shader ", name, " - ", shaderTypeToString(types[i]));
 			}
 			glDeleteShader(shd);
 			return false;
@@ -1705,78 +1710,75 @@ bool createProgram(ProgramHandle prog, const VertexDecl& decl, const char** srcs
 		GLint log_len = 0;
 		glGetProgramiv(prg, GL_INFO_LOG_LENGTH, &log_len);
 		if (log_len > 0) {
-			Array<char> log_buf(*g_gpu.allocator);
+			Array<char> log_buf(gl->allocator);
 			log_buf.resize(log_len);
 			glGetProgramInfoLog(prg, log_len, &log_len, &log_buf[0]);
-			logError("Renderer") << name << ": " << &log_buf[0];
+			logError(name, ": ", &log_buf[0]);
 		}
 		else {
-			logError("Renderer") << "Failed to link program " << name;
+			logError("Failed to link program ", name);
 		}
 		glDeleteProgram(prg);
 		return false;
 	}
 
-	const int id = prog.value;
-	g_gpu.programs[id].handle = prg;
-	g_gpu.programs[id].decl = decl;
+	ASSERT(prog);
+	prog->gl_handle = prg;
+	prog->decl = decl;
 	return true;
 }
 
 
 void preinit(IAllocator& allocator, bool load_renderdoc)
 {
+	gl.create(allocator);
 	if (load_renderdoc) try_load_renderdoc();
-	g_gpu.allocator = &allocator;
-	g_gpu.textures.init();
-	g_gpu.buffers.init();
-	g_gpu.programs.init();
 }
 
 
-bool getMemoryStats(Ref<MemoryStats> stats) {
-	if (!g_gpu.has_gpu_mem_info_ext) return false;
+bool getMemoryStats(MemoryStats& stats) {
+	if (!gl->has_gpu_mem_info_ext) return false;
 
 	GLint tmp;
 	glGetIntegerv(GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX, &tmp);
-	stats->total_available_mem = (u64)tmp * 1024;
+	stats.total_available_mem = (u64)tmp * 1024;
 
 	glGetIntegerv(GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &tmp);
-	stats->current_available_mem = (u64)tmp * 1024;
+	stats.current_available_mem = (u64)tmp * 1024;
 
 	glGetIntegerv(GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &tmp);
-	stats->dedicated_vidmem = (u64)tmp * 1024;
+	stats.dedicated_vidmem = (u64)tmp * 1024;
 	
 	return true;
 }
 
 
-bool init(void* window_handle, u32 init_flags)
+bool init(void* window_handle, InitFlags init_flags)
 {
 	#ifdef LUMIX_DEBUG
 		const bool debug = true;
 	#else 
-		const bool debug = init_flags & (u32)InitFlags::DEBUG_OUTPUT;
+		const bool debug = u32(init_flags & InitFlags::DEBUG_OUTPUT);
 	#endif
 	
-	g_gpu.thread = OS::getCurrentThreadID();
-	g_gpu.contexts[0].window_handle = window_handle;
+	gl->thread = os::getCurrentThreadID();
+	gl->contexts[0].window_handle = window_handle;
 	#ifdef _WIN32
-		g_gpu.contexts[0].device_context = GetDC((HWND)window_handle);
-		if (!load_gl(g_gpu.contexts[0].device_context, init_flags)) return false;
+		gl->contexts[0].device_context = GetDC((HWND)window_handle);
+		if (!load_gl(gl->contexts[0].device_context, init_flags)) return false;
 	#else
 		if (!load_gl(window_handle, init_flags)) return false;
 	#endif
 
-	glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &g_gpu.max_vertex_attributes);
+	glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &gl->max_vertex_attributes);
 
 	int extensions_count;
 	glGetIntegerv(GL_NUM_EXTENSIONS, &extensions_count);
-	g_gpu.has_gpu_mem_info_ext = false; 
+	gl->has_gpu_mem_info_ext = false; 
 	for(int i = 0; i < extensions_count; ++i) {
 		const char* ext = (const char*)glGetStringi(GL_EXTENSIONS, i);
 		if (equalStrings(ext, "GL_NVX_gpu_memory_info")) {
-			g_gpu.has_gpu_mem_info_ext = true; 
+			gl->has_gpu_mem_info_ext = true; 
 			break;
 		}
 		//OutputDebugString(ext);
@@ -1796,14 +1798,15 @@ bool init(void* window_handle, u32 init_flags)
 
 	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 	glBindVertexArray(0);	
-	glCreateFramebuffers(1, &g_gpu.framebuffer);
+	glCreateFramebuffers(1, &gl->framebuffer);
 
 	
-	g_gpu.default_program = allocProgramHandle();
-	Program& p = g_gpu.programs[g_gpu.default_program.value];
-	p.handle = glCreateProgram();
-	glGenVertexArrays(1, &g_gpu.contexts[0].vao);
-	glBindVertexArray(g_gpu.contexts[0].vao);
+	gl->default_program = allocProgramHandle();
+	ASSERT(gl->default_program);
+	Program& p = *gl->default_program;
+	p.gl_handle = glCreateProgram();
+	glGenVertexArrays(1, &gl->contexts[0].vao);
+	glBindVertexArray(gl->contexts[0].vao);
 	glVertexBindingDivisor(0, 0);
 	glVertexBindingDivisor(1, 1);
 
@@ -1811,12 +1814,16 @@ bool init(void* window_handle, u32 init_flags)
 	const char* vs_src = "void main() { gl_Position = vec4(0, 0, 0, 0); }";
 	glShaderSource(vs, 1, &vs_src, nullptr);
 	glCompileShader(vs);
-	glAttachShader(p.handle, vs);
-	glLinkProgram(p.handle);
+	glAttachShader(p.gl_handle, vs);
+	glLinkProgram(p.gl_handle);
 	glDeleteShader(vs);
 
-	g_gpu.last_state = 1;
-	setState(0);
+	glCreateBuffers(1, &gl->helper_indirect_buffer);
+	glNamedBufferStorage(gl->helper_indirect_buffer, 256, nullptr, GL_DYNAMIC_STORAGE_BIT);
+
+	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &gl->max_anisotropy);
+	gl->last_state = StateFlags(1);
+	setState(StateFlags::NONE);
 
 	return true;
 }
@@ -1825,39 +1832,38 @@ bool init(void* window_handle, u32 init_flags)
 bool isOriginBottomLeft() { return true; }
 
 
-void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst_y) {
+void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 	checkThread();
-	Texture& dst = g_gpu.textures[dst_handle.value];
-	Texture& src = g_gpu.textures[src_handle.value];
-	ASSERT(src.target == GL_TEXTURE_2D || src.target == GL_TEXTURE_CUBE_MAP);
-	ASSERT(src.target == dst.target);
+	ASSERT(dst);
+	ASSERT(src);
+	ASSERT(src->target == GL_TEXTURE_2D || src->target == GL_TEXTURE_CUBE_MAP);
+	ASSERT(src->target == dst->target);
 
 	u32 mip = 0;
-	while ((src.width >> mip) != 0 || (src.height >> mip) != 0) {
-		const u32 w = maximum(src.width >> mip, 1);
-		const u32 h = maximum(src.height >> mip, 1);
+	while ((src->width >> mip) != 0 || (src->height >> mip) != 0) {
+		const u32 w = maximum(src->width >> mip, 1);
+		const u32 h = maximum(src->height >> mip, 1);
 
-		if (src.target == GL_TEXTURE_CUBE_MAP) {
-			glCopyImageSubData(src.handle, src.target, mip, 0, 0, 0, dst.handle, dst.target, mip, dst_x, dst_y, 0, w, h, 6);
+		if (src->target == GL_TEXTURE_CUBE_MAP) {
+			glCopyImageSubData(src->gl_handle, src->target, mip, 0, 0, 0, dst->gl_handle, dst->target, mip, dst_x, dst_y, 0, w, h, 6);
 		}
 		else {
-			glCopyImageSubData(src.handle, src.target, mip, 0, 0, 0, dst.handle, dst.target, mip, dst_x, dst_y, 0, w, h, 1);
+			glCopyImageSubData(src->gl_handle, src->target, mip, 0, 0, 0, dst->gl_handle, dst->target, mip, dst_x, dst_y, 0, w, h, 1);
 		}
 		++mip;
-		if (src.flags & (u32)TextureFlags::NO_MIPS) break;
-		if (dst.flags & (u32)TextureFlags::NO_MIPS) break;
+		if (u32(src->flags & TextureFlags::NO_MIPS)) break;
+		if (u32(dst->flags & TextureFlags::NO_MIPS)) break;
 	}
 }
 
 void readTexture(TextureHandle texture, u32 mip, Span<u8> buf)
 {
 	checkThread();
-
-	Texture& t = g_gpu.textures[texture.value];
-	const GLuint handle = t.handle;
+	ASSERT(texture);
+	const GLuint handle = texture->gl_handle;
 
 	for (int i = 0; i < sizeof(s_texture_formats) / sizeof(s_texture_formats[0]); ++i) {
-		if (s_texture_formats[i].gl_internal == t.format) {
+		if (s_texture_formats[i].gl_internal == texture->format) {
 			const auto& f = s_texture_formats[i];
 			glGetTextureImage(handle, mip, f.gl_format, f.type, buf.length(), buf.begin());
 			return;
@@ -1885,14 +1891,15 @@ QueryHandle createQuery()
 {
 	GLuint q;
 	glGenQueries(1, &q);
-	return {q};
+	ASSERT(q != 0);
+	return (Query*)(uintptr_t)q;
 }
 
 
 bool isQueryReady(QueryHandle query)
 {
 	GLuint done;
-	glGetQueryObjectuiv(query.value, GL_QUERY_RESULT_AVAILABLE, &done);
+	glGetQueryObjectuiv((GLuint)(uintptr_t)query, GL_QUERY_RESULT_AVAILABLE, &done);
 	return done;
 }
 
@@ -1901,39 +1908,41 @@ u64 getQueryFrequency() { return 1'000'000'000; }
 u64 getQueryResult(QueryHandle query)
 {
 	u64 time;
-	glGetQueryObjectui64v(query.value, GL_QUERY_RESULT, &time);
+	glGetQueryObjectui64v((GLuint)(uintptr_t)query, GL_QUERY_RESULT, &time);
 	return time;
 }
 
 
 void destroy(QueryHandle query)
 {
-	glDeleteQueries(1, &query.value);
+	GLuint q = (GLuint)(uintptr_t)query;
+	glDeleteQueries(1, &q);
 }
 
 
 void queryTimestamp(QueryHandle query)
 {
-	glQueryCounter(query.value, GL_TIMESTAMP);
+	glQueryCounter((GLuint)(uintptr_t)query, GL_TIMESTAMP);
 }
 
 void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 {
-	const GLuint t = g_gpu.textures[cube.value].handle;
+	ASSERT(cube);
+	const GLuint t = cube->gl_handle;
 	checkThread();
 	glDisable(GL_FRAMEBUFFER_SRGB);
-	glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, t, mip);
 
 	GLint max_attachments = 0;
 	glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &max_attachments);
 	for(int i = 1; i < max_attachments; ++i) {
-		glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER, 0);
+		glNamedFramebufferRenderbuffer(gl->framebuffer, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER, 0);
 	}
-	glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
-	glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+	glNamedFramebufferRenderbuffer(gl->framebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+	glNamedFramebufferRenderbuffer(gl->framebuffer, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	ASSERT(status == GL_FRAMEBUFFER_COMPLETE);
 
@@ -1942,79 +1951,82 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 	glDrawBuffers(1, &db);
 }
 
-void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags)
+void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, FramebufferFlags flags)
 {
 	checkThread();
 
-	if (flags & (u32)FramebufferFlags::SRGB) {
+	if (u32(flags & FramebufferFlags::SRGB)) {
 		glEnable(GL_FRAMEBUFFER_SRGB);
 	}
 	else {
 		glDisable(GL_FRAMEBUFFER_SRGB);
 	}
 
-	if(!attachments || num == 0) {
+	if((!attachments || num == 0) && !ds) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		return;
 	}
 
-	u32 rb_count = 0;
-	bool depth_bound = false;
 	for (u32 i = 0; i < num; ++i) {
-		const GLuint t = g_gpu.textures[attachments[i].value].handle;
-		GLint internal_format;
+		ASSERT(attachments[i]);
+		const GLuint t = attachments[i]->gl_handle;
 		glBindTexture(GL_TEXTURE_2D, t);
-		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal_format);
-		
-		switch(internal_format) {
+		glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, t, 0);
+	}
+
+	if (ds) {
+		switch(ds->format) {
 			case GL_DEPTH24_STENCIL8:
-				glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
+				glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t, 0);
-				depth_bound = true;
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->gl_handle, 0);
 				break;
 			case GL_DEPTH_COMPONENT24:
 			case GL_DEPTH_COMPONENT32:
-				glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
+				glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, t, 0);
-				depth_bound = true;
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, ds->gl_handle, 0);
 				break;
-			default:
-				glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, t, 0);
-				++rb_count;
-				break;
+			default: ASSERT(false);
 		}
+	}
+	else {
+		glNamedFramebufferRenderbuffer(gl->framebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+		glNamedFramebufferRenderbuffer(gl->framebuffer, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
 	}
 
 	GLint max_attachments = 0;
 	glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &max_attachments);
-	for(int i = rb_count; i < max_attachments; ++i) {
-		glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER, 0);
+	for(int i = num; i < max_attachments; ++i) {
+		glNamedFramebufferRenderbuffer(gl->framebuffer, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER, 0);
 	}
 
-	if(!depth_bound) {
-		glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
-		glNamedFramebufferRenderbuffer(g_gpu.framebuffer, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
-	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, g_gpu.framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	ASSERT(status == GL_FRAMEBUFFER_COMPLETE);
 
 	GLenum db[16];
 	for (u32 i = 0; i < lengthOf(db); ++i) db[i] = GL_COLOR_ATTACHMENT0 + i;
 	
-	glDrawBuffers(rb_count, db);
+	glDrawBuffers(num, db);
 }
 
 
 void shutdown()
 {
 	checkThread();
+	destroy(gl->default_program);
+	for (WindowContext& ctx : gl->contexts) {
+		if (!ctx.window_handle) continue;
+		#ifdef _WIN32
+			wglMakeCurrent(ctx.device_context, 0);
+			wglDeleteContext(ctx.hglrc);
+		#endif
+	}
+	gl.destroy();
 }
 
-} // ns gpu 
+} // namespace gpu
 
-} // ns Lumix
+} // namespace Lumix

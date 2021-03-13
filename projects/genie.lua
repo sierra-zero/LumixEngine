@@ -1,15 +1,22 @@
-local ide_dir = iif(_ACTION == nil, "vs2019", _ACTION)
-if "linux-gcc" == _OPTIONS["gcc"] then
-	ide_dir = "gcc"
+local LOCATION = "tmp/"
+if _ACTION == nil then
+	LOCATION = LOCATION .. "vs2019"
+	binary_api_dir = "vs2017"
+elseif "linux-gcc" == _OPTIONS["gcc"] then
+	LOCATION = LOCATION .. "gcc"
+	binary_api_dir = "gmake"
 elseif "linux-gcc-5" == _OPTIONS["gcc"] then
-	ide_dir = "gcc5"
+	LOCATION = LOCATION .. "gcc"
+	binary_api_dir = "gmake"
 elseif "linux-clang" == _OPTIONS["gcc"] then
-	ide_dir = "clang"
+	LOCATION = LOCATION .. "clang"
+	binary_api_dir = "gmake"
+else
+	LOCATION = LOCATION .. _ACTION
+	binary_api_dir = iif(_ACTION == "vs2019", "vs2017", "gmake")
 end
-binary_api_dir = iif(ide_dir == "vs2019", "vs2017", ide_dir)
 
 local ROOT_DIR = path.getabsolute("../")
-local LOCATION = "tmp/" .. ide_dir
 local BINARY_DIR = LOCATION .. "/bin/"
 build_app = false
 build_studio = true
@@ -18,6 +25,7 @@ local debug_args = nil
 local release_args = nil
 local plugins = {}
 local base_plugins = {}
+local plugin_creators = {}
 local embed_resources = false
 build_studio_callbacks = {}
 build_app_callbacks = {}
@@ -41,24 +49,15 @@ end
 
 
 function linkPlugin(plugin_name)
+	table.insert(plugin_creators, plugin_name)
 	if build_studio then
 		project "studio"
-			if _OPTIONS["static-plugins"] then	
-				forceLink("s_" .. plugin_name .. "_plugin_register")
-				forceLink("setStudioApp_" .. plugin_name)
-			end
 			links(plugin_name)
 	end
 
 	if build_app then
 		project "app"
-		links {plugin_name}
-		if _OPTIONS["static-plugins"] then	
-			forceLink ("s_" .. plugin_name .. "_plugin_register")
-		end
-		if build_studio then
-			forceLink("setStudioApp_" .. plugin_name)
-		end
+			links {plugin_name}
 	end
 end
 
@@ -68,8 +67,8 @@ newoption {
 }
 
 newoption {
-	trigger = "static-plugins",
-	description = "Plugins are static libraries."
+	trigger = "dynamic-plugins",
+	description = "Plugins are dynamic libraries."
 }
 
 newoption {
@@ -257,7 +256,8 @@ function defaultConfigurations()
 		
 	configuration {}
 		files { "lumix.natvis", "../.editorconfig" }
-		defines { "_ITERATOR_DEBUG_LEVEL=0" }
+		defines { "_ITERATOR_DEBUG_LEVEL=0", "STBI_NO_STDIO" }
+		flags { "FullSymbols" } -- VS can't set brekpoints from time to time, only rebuilding several times or using FullSymbols helps
 end
 
 function linkLib(lib)
@@ -282,7 +282,7 @@ function useLua()
 end
 
 function libType()
-	if _OPTIONS["static-plugins"] then
+	if not _OPTIONS["dynamic-plugins"] then
 		kind "StaticLib"
 	else
 		kind "SharedLib"
@@ -372,18 +372,9 @@ function linkPhysX()
 	end
 end
 
-function forceLink(name)
-
-	configuration { "linux" }
-		linkoptions {"-u " .. name}
-	configuration { "x64", "vs*" }
-		linkoptions {"/INCLUDE:" .. name}
-	configuration {}
-end
-
 solution "LumixEngine"
 	flags { "Cpp17" }
-	if _ACTION == "gmake" then
+	if _ACTION == "gmake" or _ACTION == "ninja" then
 		if "linux-gcc" == _OPTIONS["gcc"] then
 			LOCATION = "tmp/gcc"
 
@@ -473,7 +464,7 @@ solution "LumixEngine"
 
 	configuration {}
 
-	if _OPTIONS["static-plugins"] then
+	if not _OPTIONS["dynamic-plugins"] then
 		defines {"STATIC_PLUGINS"}
 	end
 
@@ -485,24 +476,36 @@ project "engine"
 	libType()
 
 	files { "../src/engine/**.h",
+			"../src/engine/**.c",
 			"../src/engine/**.cpp",
+			"../src/engine/**.inl",
 			"genie.lua",
 			"../external/imgui/**.h",
 			"../external/imgui/**.cpp",
 			"../external/imgui/**.inl"
 	}
+	excludes { 
+		"../external/imgui/imgui_demo.cpp",
+		"../external/imgui/imgui.cpp",
+		"../external/imgui/imgui_tables.cpp",
+		"../external/imgui/imgui_draw.cpp",
+		"../external/imgui/imgui_widgets.cpp",
+		"../external/imgui/imgui_freetype.cpp",
+		"../external/imgui/imnodes.cpp"
+	}
+
 
 	defines { "BUILDING_ENGINE" }
 	includedirs { "../external/luajit/include", "../external/freetype/include" }
 	
 	linkLib "lua51"
 	linkLib "luajit"
-	if not _OPTIONS["static-plugins"] then
+	if _OPTIONS["dynamic-plugins"] then
 		linkLib "freetype"
 	end
 
 	configuration { "vs20*" }
-		if not _OPTIONS["static-plugins"] then
+		if _OPTIONS["dynamic-plugins"] then
 			linkoptions {"/DEF:\"../../../src/engine/engine.def\""}
 		end
 
@@ -542,6 +545,21 @@ if has_plugin("renderer") then
 
 		files { "../src/renderer/**.h", "../src/renderer/**.cpp", "../src/renderer/**.c", "../external/meshoptimizer/**.*" }
 		files { "../data/pipelines/**.*" }
+		excludes { 
+			"../external/meshoptimizer/clusterizer.cpp",
+			"../external/meshoptimizer/overdrawanalyzer.cpp",
+			"../external/meshoptimizer/overdrawoptimizer.cpp",
+			"../external/meshoptimizer/simplifier.cpp",
+			"../external/meshoptimizer/spatialorder.cpp",
+			"../external/meshoptimizer/stripifier.cpp",
+			"../external/meshoptimizer/vcacheanalyzer.cpp",
+			"../external/meshoptimizer/vcacheoptimizer.cpp",
+			"../external/meshoptimizer/vertexcodec.cpp",
+			"../external/meshoptimizer/vertexfilter.cpp",
+			"../external/meshoptimizer/vfetchanalyzer.cpp",
+			"../external/meshoptimizer/vfetchoptimizer.cpp"
+		}
+		
 		includedirs { "../src", "../external/nvtt/include", "../external/freetype/include", "../external/" }
 		defines { "BUILDING_RENDERER" }
 		links { "engine" }
@@ -625,6 +643,15 @@ if has_plugin("navigation") then
 	project "navigation"
 		libType()
 
+		excludes { 
+			"../external/recast/src/DetourCrowd.cpp",
+			"../external/recast/src/DetourLocalBoundary.cpp",
+			"../external/recast/src/DetourObstacleAvoidance.cpp",
+			"../external/recast/src/DetourPathCorridor.cpp",
+			"../external/recast/src/DetourPathQueue.cpp",
+			"../external/recast/src/DetourProximityGrid.cpp",
+		}
+
 		files { "../src/navigation/**.h", "../src/navigation/**.cpp", "../external/recast/src/**.cpp" }
 		includedirs { "../src", "../src/navigation", "../external/recast/include" }
 		links { "engine", "renderer" }
@@ -687,7 +714,7 @@ if build_app then
 
 		kind "ConsoleApp"
 		
-		if #plugins > 0 then
+		if #plugins > 0 and _OPTIONS["dynamic-plugins"] then
 			local def = ""
 			for idx, plugin in ipairs(plugins) do
 				if idx > 1 then 
@@ -699,13 +726,7 @@ if build_app then
 		end
 
 		includedirs { "../src", "../src/app" }
-		if _OPTIONS["static-plugins"] then	
-			if build_studio then
-				for _, plugin in ipairs(plugins) do
-					forceLink("setStudioApp_" .. plugin)
-				end
-			end
-				
+		if not _OPTIONS["dynamic-plugins"] then	
 			if has_plugin("renderer") then
 				linkOpenGL()
 			end
@@ -714,7 +735,7 @@ if build_app then
 			end
 			if build_studio then links {"editor"} end
 
-			links { "editor", "engine" }
+			links { "engine" }
 			linkLib "nvtt"
 			linkLib "freetype"
 			linkLib "luajit"
@@ -755,10 +776,43 @@ if build_app then
 		defaultConfigurations()
 end
 
+-- write plugins.inl
 for _, plugin in ipairs(base_plugins) do
 	linkPlugin(plugin)
 end
-
+local file = io.open("../src/engine/plugins.inl", "w")
+io.output(file)
+io.write("// generated by genie.lua\n\n")
+io.write "#ifdef LUMIX_PLUGIN_DECLS\n"
+	for _, plugin in ipairs(plugin_creators) do
+		io.write([[extern "C" IPlugin* createPlugin_]] .. plugin .. "(Engine&);\n")
+	end
+io.write "#elif defined LUMIX_EDITOR_PLUGINS_DECLS\n"
+	if not _OPTIONS["dynamic-plugins"] then
+		for _, plugin in ipairs(plugin_creators) do
+			io.write([[extern "C" Lumix::StudioApp::IPlugin* setStudioApp_]] .. plugin .. "(StudioApp&);\n")
+		end
+	end
+io.write "#elif defined LUMIX_EDITOR_PLUGINS\n"
+	if not _OPTIONS["dynamic-plugins"] then
+		for _, plugin in ipairs(plugin_creators) do
+			io.write "{\n"
+			io.write("\tStudioApp::IPlugin* plugin = setStudioApp_" .. plugin .. "(*this);\n")
+			io.write("\tif (plugin) this->addPlugin(*plugin);\n")
+			io.write "}\n"
+		end
+	end
+io.write "#else\n"
+	if not _OPTIONS["dynamic-plugins"] then
+		for _, plugin in ipairs(plugin_creators) do
+			io.write "{\n"
+			io.write("\tIPlugin* p = createPlugin_" .. plugin .. "(engine);\n")
+			io.write "\tif (p) engine.getPluginManager().addPlugin(p);\n"
+			io.write "}\n"
+		end
+	end
+io.write "#endif\n"
+io.close(file)
 
 if build_studio then
 	project "editor"
@@ -776,7 +830,7 @@ if build_studio then
 			"../external"
 		}
 		
-		if #plugins > 0 then
+		if #plugins > 0 and _OPTIONS["dynamic-plugins"] then
 			local def = ""
 			for idx, plugin in ipairs(plugins) do
 				if idx > 1 then 
@@ -792,7 +846,7 @@ if build_studio then
 
 		configuration {}
 
-		if not _OPTIONS["static-plugins"] then	
+		if _OPTIONS["dynamic-plugins"] then	
 			configuration {"vs*"}
 				links { "winmm", "imm32", "version" }
 			configuration {}
@@ -829,10 +883,12 @@ if build_studio then
 
 		includedirs { "../src" }
 
-		if _OPTIONS["static-plugins"] then	
+		if not _OPTIONS["dynamic-plugins"] then	
 			configuration { "linux" }
 				links { "dl", "GL", "X11", "rt" }
-				linkoptions { "-Wl,-rpath '-Wl,$$ORIGIN'" }
+				if _ACTION == "gmake" then
+					linkoptions { "-Wl,-rpath '-Wl,$$ORIGIN'" }
+				end
 				links { "nvimage", "nvcore", "nvmath", "nvthread", "squish", "bc6h", "bc7" } 
 
 			configuration { "vs*" }

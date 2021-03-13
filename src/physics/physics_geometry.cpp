@@ -1,4 +1,7 @@
-#include <PxPhysicsAPI.h>
+#include <cooking/PxConvexMeshDesc.h>
+#include <cooking/PxCooking.h>
+#include <foundation/PxIO.h>
+#include <PxPhysics.h>
 
 #include "physics_geometry.h"
 #include "engine/log.h"
@@ -104,13 +107,13 @@ bool PhysicsGeometry::load(u64 size, const u8* mem)
 	file.read(&header, sizeof(header));
 	if (header.m_magic != HEADER_MAGIC)
 	{
-		logError("Physics") << "Corrupted geometry " << getPath().c_str();
+		logError("Corrupted geometry ", getPath());
 		return false;
 	}
 
 	if(header.m_version > (u32)Versions::LAST)
 	{
-		logError("Physics") << "Unsupported version of geometry " << getPath().c_str();
+		logError("Unsupported version of geometry ", getPath());
 		return false;
 	}
 

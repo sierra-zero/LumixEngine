@@ -6,7 +6,9 @@
 #include "engine/delegate_list.h"
 #include "engine/flag_set.h"
 #include "engine/hash_map.h"
+#include "engine/metaprogramming.h"
 #include "engine/log.h"
+#include "engine/lz4.h"
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "engine/os.h"
@@ -16,12 +18,9 @@
 #include "engine/stream.h"
 #include "engine/string.h"
 
-namespace Lumix
-{
+namespace Lumix {
 
-
-struct AsyncItem
-{
+struct AsyncItem {
 	enum class Flags : u32 {
 		FAILED = 1 << 0,
 		CANCELED = 1 << 1,
@@ -34,7 +33,7 @@ struct AsyncItem
 
 	FileSystem::ContentCallback callback;
 	OutputMemoryStream data;
-	StaticString<MAX_PATH_LENGTH> path;
+	StaticString<LUMIX_MAX_PATH> path;
 	u32 id = 0;
 	FlagSet<Flags, u32> flags;
 };
@@ -43,18 +42,13 @@ struct AsyncItem
 struct FileSystemImpl;
 
 
-struct FSTask final : Thread
-{
-public:
+struct FSTask final : Thread {
 	FSTask(FileSystemImpl& fs, IAllocator& allocator)
 		: Thread(allocator)
 		, m_fs(fs)
-	{
-	}
-
+	{}
 
 	~FSTask() = default;
-
 
 	void stop();
 	int task() override;
@@ -65,8 +59,7 @@ private:
 };
 
 
-struct FileSystemImpl final : FileSystem
-{
+struct FileSystemImpl : FileSystem {
 	explicit FileSystemImpl(const char* base_path, IAllocator& allocator)
 		: m_allocator(allocator)
 		, m_queue(allocator)	
@@ -75,31 +68,25 @@ struct FileSystemImpl final : FileSystem
 		, m_semaphore(0, 0xffFF)
 	{
 		setBasePath(base_path);
-		m_task = LUMIX_NEW(m_allocator, FSTask)(*this, m_allocator);
+		m_task.create(*this, m_allocator);
 		m_task->create("Filesystem", true);
 	}
 
-
-	~FileSystemImpl()
-	{
+	~FileSystemImpl() override {
 		m_task->stop();
 		m_task->destroy();
-		LUMIX_DELETE(m_allocator, m_task);
+		m_task.destroy();
 	}
 
 
 	bool hasWork() override
 	{
-		MutexGuard lock(m_mutex);
-		return !m_queue.empty();
+		return m_work_counter != 0;
 	}
-
-
 
 	const char* getBasePath() const override { return m_base_path; }
 
-
-	void setBasePath(const char* dir) override
+	void setBasePath(const char* dir) final
 	{ 
 		Path::normalize(dir, Span(m_base_path.data));
 		if (!endsWith(m_base_path, "/") && !endsWith(m_base_path, "\\")) {
@@ -107,14 +94,15 @@ struct FileSystemImpl final : FileSystem
 		}
 	}
 
-	bool getContentSync(const Path& path, Ref<OutputMemoryStream> content) override {
-		OS::InputFile file;
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path.c_str());
+	bool getContentSync(const Path& path, OutputMemoryStream& content) override {
+		os::InputFile file;
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path.c_str());
 
 		if (!file.open(full_path)) return false;
 
-		content->resize((int)file.size());
-		if (!file.read(content->getMutableData(), content->size())) {
+		content.resize((int)file.size());
+		if (!file.read(content.getMutableData(), content.size())) {
+			logError("Could not read ", path);
 			file.close();
 			return false;
 		}
@@ -124,9 +112,10 @@ struct FileSystemImpl final : FileSystem
 
 	AsyncHandle getContent(const Path& file, const ContentCallback& callback) override
 	{
-		if (!file.isValid()) return AsyncHandle::invalid();
+		if (file.isEmpty()) return AsyncHandle::invalid();
 
 		MutexGuard lock(m_mutex);
+		++m_work_counter;
 		AsyncItem& item = m_queue.emplace(m_allocator);
 		++m_last_id;
 		if (m_last_id == 0) ++m_last_id;
@@ -144,6 +133,7 @@ struct FileSystemImpl final : FileSystem
 		for (AsyncItem& item : m_queue) {
 			if (item.id == async.value) {
 				item.flags.set(AsyncItem::Flags::CANCELED);
+				--m_work_counter;
 				return;
 			}
 		}
@@ -156,61 +146,61 @@ struct FileSystemImpl final : FileSystem
 	}
 
 
-	bool open(const char* path, Ref<OS::InputFile> file) override
+	bool open(const char* path, os::InputFile& file) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path);
-		return file->open(full_path);
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path);
+		return file.open(full_path);
 	}
 
 
-	bool open(const char* path, Ref<OS::OutputFile> file) override
+	bool open(const char* path, os::OutputFile& file) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path);
-		return file->open(full_path);
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path);
+		return file.open(full_path);
 	}
 
 
 	bool deleteFile(const char* path) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path);
-		return OS::deleteFile(full_path);
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path);
+		return os::deleteFile(full_path);
 	}
 
 
 	bool moveFile(const char* from, const char* to) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path_from(m_base_path, from);
-		StaticString<MAX_PATH_LENGTH> full_path_to(m_base_path, to);
-		return OS::moveFile(full_path_from, full_path_to);
+		StaticString<LUMIX_MAX_PATH> full_path_from(m_base_path, from);
+		StaticString<LUMIX_MAX_PATH> full_path_to(m_base_path, to);
+		return os::moveFile(full_path_from, full_path_to);
 	}
 
 
 	bool copyFile(const char* from, const char* to) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path_from(m_base_path, from);
-		StaticString<MAX_PATH_LENGTH> full_path_to(m_base_path, to);
-		return OS::copyFile(full_path_from, full_path_to);
+		StaticString<LUMIX_MAX_PATH> full_path_from(m_base_path, from);
+		StaticString<LUMIX_MAX_PATH> full_path_to(m_base_path, to);
+		return os::copyFile(full_path_from, full_path_to);
 	}
 
 
 	bool fileExists(const char* path) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path);
-		return OS::fileExists(full_path);
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path);
+		return os::fileExists(full_path);
 	}
 
 
 	u64 getLastModified(const char* path) override
 	{
-		StaticString<MAX_PATH_LENGTH> full_path(m_base_path, path);
-		return OS::getLastModified(full_path);
+		StaticString<LUMIX_MAX_PATH> full_path(m_base_path, path);
+		return os::getLastModified(full_path);
 	}
 
 
-	OS::FileIterator* createFileIterator(const char* dir) override
+	os::FileIterator* createFileIterator(const char* dir) override
 	{
-		StaticString<MAX_PATH_LENGTH> path(m_base_path, dir);
-		return OS::createFileIterator(path, m_allocator);
+		StaticString<LUMIX_MAX_PATH> path(m_base_path, dir);
+		return os::createFileIterator(path, m_allocator);
 	}
 
 	void makeAbsolute(Span<char> absolute, const char* relative) const override {
@@ -239,7 +229,7 @@ struct FileSystemImpl final : FileSystem
 	{
 		PROFILE_FUNCTION();
 
-		OS::Timer timer;
+		os::Timer timer;
 		for(;;) {
 			m_mutex.enter();
 			if (m_finished.empty()) {
@@ -249,6 +239,8 @@ struct FileSystemImpl final : FileSystem
 
 			AsyncItem item = static_cast<AsyncItem&&>(m_finished[0]);
 			m_finished.erase(0);
+			ASSERT(m_work_counter > 0);
+			--m_work_counter;
 
 			m_mutex.exit();
 
@@ -263,9 +255,10 @@ struct FileSystemImpl final : FileSystem
 	}
 
 	IAllocator& m_allocator;
-	FSTask* m_task;
-	StaticString<MAX_PATH_LENGTH> m_base_path;
+	Local<FSTask> m_task;
+	StaticString<LUMIX_MAX_PATH> m_base_path;
 	Array<AsyncItem> m_queue;
+	u32 m_work_counter = 0;
 	Array<AsyncItem> m_finished;
 	Mutex m_mutex;
 	Semaphore m_semaphore;
@@ -280,7 +273,7 @@ int FSTask::task()
 		m_fs.m_semaphore.wait();
 		if (m_finish) break;
 
-		StaticString<MAX_PATH_LENGTH> path;
+		StaticString<LUMIX_MAX_PATH> path;
 		{
 			MutexGuard lock(m_fs.m_mutex);
 			ASSERT(!m_fs.m_queue.empty());
@@ -291,23 +284,8 @@ int FSTask::task()
 			}
 		}
 
-		bool success = true;
-		
 		OutputMemoryStream data(m_fs.m_allocator);
-
-		OS::InputFile file;
-		StaticString<MAX_PATH_LENGTH> full_path(m_fs.m_base_path, path);
-		
-		if (file.open(full_path)) {
-			data.resize((int)file.size());
-			if (!file.read(data.getMutableData(), data.size())) {
-				success = false;
-			}
-			file.close();
-		}
-		else {
-			success = false;
-		}
+		bool success = m_fs.getContentSync(Path(path), data);
 
 		{
 			MutexGuard lock(m_fs.m_mutex);
@@ -331,15 +309,83 @@ void FSTask::stop()
 	m_fs.m_semaphore.signal();
 }
 
+struct PackFileSystem : FileSystemImpl {
+	PackFileSystem(const char* pak_path, IAllocator& allocator) 
+		: FileSystemImpl("pack://", allocator) 
+		, m_map(allocator)
+		, m_allocator(allocator)
+	{
+		if (!m_file.open(pak_path)) {
+			logError("Failed to open game.pak");
+			return;
+		}
+		const u32 count = m_file.read<u32>();
+		for (u32 i = 0; i < count; ++i) {
+			const u32 hash = m_file.read<u32>();
+			PackFile& f = m_map.insert(hash);
+			f.offset = m_file.read<u64>();
+			f.size = m_file.read<u64>();
+			f.compressed_size = m_file.read<u64>();
+		}
+	}
 
-FileSystem* FileSystem::create(const char* base_path, IAllocator& allocator)
+	~PackFileSystem() {
+		m_file.close();
+	}
+
+	bool getContentSync(const Path& path, OutputMemoryStream& content) override {
+		Span<const char> basename = Path::getBasename(path.c_str());
+		u32 hash;
+		fromCString(basename, hash);
+		if (basename[0] < '0' || basename[0] > '9' || hash == 0) {
+			hash = path.getHash();
+		}
+		auto iter = m_map.find(hash);
+		if (!iter.isValid()) {
+			iter = m_map.find(path.getHash());
+			if (!iter.isValid()) return false;
+		}
+
+		OutputMemoryStream compressed(m_allocator);
+		compressed.resize(iter.value().compressed_size);
+		MutexGuard lock(m_mutex);
+		const u32 header_size = sizeof(u32) + m_map.size() * (3 * sizeof(u64) + sizeof(u32));
+		if (!m_file.seek(iter.value().offset + header_size) || !m_file.read(compressed.getMutableData(), compressed.size())) {
+			logError("Could not read ", path);
+			return false;
+		}
+
+		content.resize(iter.value().size);
+		const i32 res = LZ4_decompress_safe((const char*)compressed.data(), (char*)content.getMutableData(), (i32)iter.value().compressed_size, (i32)content.size());
+		
+		if (res != content.size()) {
+			logError("Could not decompress ", path);
+			return false;
+		}
+		return true;
+	}
+	
+	struct PackFile {
+		u64 offset;
+		u64 size;
+		u64 compressed_size;
+	};
+
+	IAllocator& m_allocator;
+	HashMap<u32, PackFile> m_map;
+	Mutex m_mutex;
+	os::InputFile m_file;
+};
+
+
+UniquePtr<FileSystem> FileSystem::create(const char* base_path, IAllocator& allocator)
 {
-	return LUMIX_NEW(allocator, FileSystemImpl)(base_path, allocator);
+	return UniquePtr<FileSystemImpl>::create(allocator, base_path, allocator);
 }
 
-void FileSystem::destroy(FileSystem* fs)
+UniquePtr<FileSystem> FileSystem::createPacked(const char* pak_path, IAllocator& allocator)
 {
-	LUMIX_DELETE(static_cast<FileSystemImpl*>(fs)->m_allocator, fs);
+	return UniquePtr<PackFileSystem>::create(allocator, pak_path, allocator);
 }
 
 

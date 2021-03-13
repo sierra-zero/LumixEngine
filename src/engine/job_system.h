@@ -5,7 +5,7 @@ namespace Lumix {
 
 struct IAllocator;
 
-namespace JobSystem {
+namespace jobs {
 
 using SignalHandle = u32;
 constexpr u8 ANY_WORKER = 0xff;
@@ -23,18 +23,18 @@ LUMIX_ENGINE_API void decSignal(SignalHandle signal);
 LUMIX_ENGINE_API void run(void* data, void(*task)(void*), SignalHandle* on_finish);
 LUMIX_ENGINE_API void runEx(void* data, void (*task)(void*), SignalHandle* on_finish, SignalHandle precondition, u8 worker_index);
 LUMIX_ENGINE_API void wait(SignalHandle waitable);
-LUMIX_ENGINE_API inline bool isValid(SignalHandle waitable) { return waitable != INVALID_HANDLE; }
 
 
 template <typename F>
 void runOnWorkers(const F& f)
 {
-	SignalHandle signal = JobSystem::INVALID_HANDLE;
-	for(int i = 0, c = getWorkersCount(); i < c; ++i) {
-		JobSystem::run((void*)&f, [](void* data){
+	SignalHandle signal = jobs::INVALID_HANDLE;
+	for(int i = 1, c = getWorkersCount(); i < c; ++i) {
+		jobs::run((void*)&f, [](void* data){
 			(*(const F*)data)();
 		}, &signal);
 	}
+	f();
 	wait(signal);
 }
 
@@ -50,7 +50,7 @@ void forEach(i32 count, i32 step, const F& f)
 
 	volatile i32 offset = 0;
 
-	JobSystem::runOnWorkers([&](){
+	jobs::runOnWorkers([&](){
 		for(;;) {
 			const i32 idx = atomicAdd(&offset, step);
 			if (idx >= count) break;
@@ -61,6 +61,6 @@ void forEach(i32 count, i32 step, const F& f)
 	});
 }
 
-} // namespace JobSystem
+} // namespace jobs
 
 } // namespace Lumix

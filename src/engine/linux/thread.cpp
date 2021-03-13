@@ -25,8 +25,8 @@ struct ThreadImpl
 static void* threadFunction(void* ptr)
 {
 	struct ThreadImpl* impl = reinterpret_cast<ThreadImpl*>(ptr);
-	pthread_setname_np(OS::getCurrentThreadID(), impl->thread_name);
-	Profiler::setThreadName(impl->thread_name);
+	pthread_setname_np(os::getCurrentThreadID(), impl->thread_name);
+	profiler::setThreadName(impl->thread_name);
 	u32 ret = 0xffffFFFF;
 	if (!impl->force_exit) ret = impl->owner->task();
 	impl->exited = true;

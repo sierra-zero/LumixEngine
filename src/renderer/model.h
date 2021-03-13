@@ -6,30 +6,25 @@
 #include "engine/geometry.h"
 #include "engine/hash_map.h"
 #include "engine/math.h"
-#include "engine/string.h"
-#include "engine/math.h"
 #include "engine/resource.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "gpu/gpu.h"
-#include "renderer.h"
 
 
 struct lua_State;
 
 
-namespace Lumix
-{
+namespace Lumix {
 
 struct Material;
 struct Mesh;
 struct Model;
 struct Pose;
 struct Renderer;
-struct InputMemoryStream;
 
 
-struct LUMIX_RENDERER_API RayCastModelHit
-{
+struct LUMIX_RENDERER_API RayCastModelHit {
 	bool is_hit;
 	float t;
 	DVec3 origin;
@@ -40,10 +35,8 @@ struct LUMIX_RENDERER_API RayCastModelHit
 };
 
 
-struct LUMIX_RENDERER_API Mesh
-{
-	enum class AttributeSemantic : u8
-	{
+struct LUMIX_RENDERER_API Mesh {
+	enum class AttributeSemantic : u8 {
 		POSITION,
 		NORMAL,
 		TANGENT,
@@ -64,33 +57,27 @@ struct LUMIX_RENDERER_API Mesh
 		NONE = 0xff
 	};
 
-	struct RenderData
-	{
+	struct RenderData {
 		gpu::BufferHandle vertex_buffer_handle;
-		u32 vb_stride; 
+		u32 vb_stride;
 		gpu::BufferHandle index_buffer_handle;
 		gpu::DataType index_type;
 		int indices_count;
 	};
 
-	struct Skin
-	{
+	struct Skin {
 		Vec4 weights;
 		i16 indices[4];
 	};
 
-	enum Type : u8
-	{
+	enum Type : u8 {
 		RIGID,
 		SKINNED,
 
 		LAST_TYPE
 	};
 
-	enum Flags : u8
-	{
-		INDICES_16_BIT = 1 << 0
-	};
+	enum Flags : u8 { INDICES_16_BIT = 1 << 0 };
 
 	Mesh(Material* mat,
 		const gpu::VertexDecl& vertex_decl,
@@ -99,6 +86,10 @@ struct LUMIX_RENDERER_API Mesh
 		const AttributeSemantic* semantics,
 		Renderer& renderer,
 		IAllocator& allocator);
+	Mesh(Mesh&& rhs);
+	~Mesh();
+
+	void operator=(Mesh&&) = delete;
 
 	void setMaterial(Material* material, Model& model, Renderer& renderer);
 	bool areIndices16() const { return flags.isSet(Flags::INDICES_16_BIT); }
@@ -115,7 +106,8 @@ struct LUMIX_RENDERER_API Mesh
 	gpu::VertexDecl vertex_decl;
 	AttributeSemantic attributes_semantic[gpu::VertexDecl::MAX_ATTRIBUTES];
 	RenderData* render_data;
-	static u32 s_last_sort_key;
+	Renderer& renderer;
+	float lod = 0;
 };
 
 
@@ -169,32 +161,33 @@ public:
 
 	ResourceType getType() const override { return TYPE; }
 
-	LODMeshIndices getLODMeshIndices(float squared_distance) const {
-		if (squared_distance < m_lod_distances[0]) return m_lod_indices[0];
-		if (squared_distance < m_lod_distances[1]) return m_lod_indices[1];
-		if (squared_distance < m_lod_distances[2]) return m_lod_indices[2];
-		if (squared_distance < m_lod_distances[3]) return m_lod_indices[3];
-		return { 0, -1 };
+	u32 getLODMeshIndices(float squared_distance) const {
+		if (squared_distance < m_lod_distances[0]) return 0;
+		if (squared_distance < m_lod_distances[1]) return 1;
+		if (squared_distance < m_lod_distances[2]) return 2;
+		if (squared_distance < m_lod_distances[3]) return 3;
+		return 4;
 	}
 
 	Mesh& getMesh(u32 index) { return m_meshes[index]; }
 	const Mesh& getMesh(u32 index) const { return m_meshes[index]; }
 	int getMeshCount() const { return m_meshes.size(); }
 	int getBoneCount() const { return m_bones.size(); }
+	const char* getBoneName(u32 idx) { return m_bones[idx].name.c_str(); }
+	i32 getBoneParent(u32 idx) { return m_bones[idx].parent_idx; }
 	const Bone& getBone(u32 i) const { return m_bones[i]; }
 	int getFirstNonrootBoneIndex() const { return m_first_nonroot_bone_index; }
 	BoneMap::const_iterator getBoneIndex(u32 hash) const { return m_bone_map.find(hash); }
 	void getPose(Pose& pose);
 	void getRelativePose(Pose& pose);
-	float getBoundingRadius() const { return m_bounding_radius; }
+	float getOriginBoundingRadius() const { return m_origin_bounding_radius; }
+	float getCenterBoundingRadius() const { return m_center_bounding_radius; }
 	RayCastModelHit castRay(const Vec3& origin, const Vec3& dir, const Pose* pose);
 	const AABB& getAABB() const { return m_aabb; }
 	void onBeforeReady() override;
 	bool isSkinned() const;
 	float* getLODDistances() { return m_lod_distances; }
 	const LODMeshIndices* getLODIndices() const { return m_lod_indices; }
-
-	static void registerLuaAPI(lua_State* L);
 
 public:
 	static const u32 FILE_MAGIC = 0x5f4c4d4f; // == '_LM2'
@@ -217,9 +210,10 @@ private:
 	Renderer& m_renderer;
 	Array<Mesh> m_meshes;
 	Array<Bone> m_bones;
-	LODMeshIndices m_lod_indices[MAX_LOD_COUNT];
+	LODMeshIndices m_lod_indices[MAX_LOD_COUNT + 1];
 	float m_lod_distances[MAX_LOD_COUNT];
-	float m_bounding_radius;
+	float m_origin_bounding_radius = 0;
+	float m_center_bounding_radius = 0;
 	BoneMap m_bone_map;
 	AABB m_aabb;
 	int m_first_nonroot_bone_index;

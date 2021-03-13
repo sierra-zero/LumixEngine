@@ -1,3 +1,6 @@
+#if 1 // set to 0 to build minimal lunex example
+
+#include "engine/allocators.h"
 #include "engine/command_line_parser.h"
 #include "engine/crc32.h"
 #include "engine/debug.h"
@@ -7,12 +10,14 @@
 #include "engine/input_system.h"
 #include "engine/job_system.h"
 #include "engine/log.h"
-#include "engine/thread.h"
 #include "engine/os.h"
-#include "engine/path_utils.h"
-#include "engine/plugin_manager.h"
+#include "engine/path.h"
+#include "engine/profiler.h"
 #include "engine/reflection.h"
+#include "engine/resource_manager.h"
+#include "engine/thread.h"
 #include "engine/universe.h"
+#include "gui/gui_system.h"
 #include "lua_script/lua_script_system.h"
 #include "renderer/pipeline.h"
 #include "renderer/render_scene.h"
@@ -20,27 +25,44 @@
 
 using namespace Lumix;
 
-static const ComponentType ENVIRONMENT_TYPE = Reflection::getComponentType("environment");
-static const ComponentType LUA_SCRIPT_TYPE = Reflection::getComponentType("lua_script");
+static const ComponentType ENVIRONMENT_TYPE = reflection::getComponentType("environment");
+static const ComponentType LUA_SCRIPT_TYPE = reflection::getComponentType("lua_script");
 
-struct Runner final : OS::Interface
+struct GUIInterface : GUISystem::Interface {
+	Pipeline* getPipeline() override { return pipeline; }
+	Vec2 getPos() const override { return Vec2(0); }
+	Vec2 getSize() const override { return size; }
+	void setCursor(os::CursorType type) override { os::setCursor(type); }
+	void enableCursor(bool enable) override { os::showCursor(enable); }
+
+	Vec2 size;
+	Pipeline* pipeline;
+};
+
+
+struct Runner final
 {
 	Runner() 
 		: m_allocator(m_main_allocator) 
 	{
-		if (!JobSystem::init(getCPUsCount(), m_allocator)) {
-			logError("Engine") << "Failed to initialize job system.";
+		if (!jobs::init(os::getCPUsCount(), m_allocator)) {
+			logError("Failed to initialize job system.");
 		}
 	}
-	~Runner() { ASSERT(!m_universe); }
+
+	~Runner() {
+		jobs::shutdown();
+		ASSERT(!m_universe); 
+	}
 
 	void onResize() {
-		if (!m_engine) return;
-		if (m_engine->getWindowHandle() == OS::INVALID_WINDOW) return;
+		if (!m_engine.get()) return;
+		if (m_engine->getWindowHandle() == os::INVALID_WINDOW) return;
 
-		const OS::Rect r = OS::getWindowClientRect(m_engine->getWindowHandle());
+		const os::Rect r = os::getWindowClientRect(m_engine->getWindowHandle());
 		m_viewport.w = r.width;
 		m_viewport.h = r.height;
+		m_gui_interface.size = Vec2((float)r.width, (float)r.height);
 	}
 
 	void initRenderPipeline() {
@@ -56,7 +78,7 @@ struct Runner final : OS::Interface
 		m_pipeline = Pipeline::create(*m_renderer, pres, "APP", m_engine->getAllocator());
 
 		while (m_engine->getFileSystem().hasWork()) {
-			sleep(100);
+			os::sleep(100);
 			m_engine->getFileSystem().processCallbacks();
 		}
 
@@ -70,79 +92,205 @@ struct Runner final : OS::Interface
 		
 		RenderScene* render_scene = (RenderScene*)m_universe->getScene(crc32("renderer"));
 		Environment& environment = render_scene->getEnvironment(env);
-		environment.diffuse_intensity = 3;
+		environment.direct_intensity = 3;
 		
 		Quat rot;
 		rot.fromEuler(Vec3(degreesToRadians(45.f), 0, 0));
 		m_universe->setRotation(env, rot);
 		
 		LuaScriptScene* lua_scene = (LuaScriptScene*)m_universe->getScene(crc32("lua_script"));
-		lua_scene->addScript(env);
-		lua_scene->setScriptPath(env, 0, Path("pipelines/sky.lua"));
+		lua_scene->addScript(env, 0);
+		lua_scene->setScriptPath(env, 0, Path("pipelines/atmo.lua"));
 	}
 
-	void onInit() override {
+	bool loadUniverse(const char* path) {
+		FileSystem& fs = m_engine->getFileSystem();
+		OutputMemoryStream data(m_allocator);
+		if (!fs.getContentSync(Path(path), data)) return false;
+
+		InputMemoryStream tmp(data);
+		EntityMap entity_map(m_allocator);
+		struct Header {
+			u32 magic;
+			i32 version;
+			u32 hash;
+			u32 engine_hash;
+		} header;
+
+		tmp.read(header);
+
+		m_universe->setName("main");
+		if (!m_engine->deserialize(*m_universe, tmp, entity_map)) {
+			logError("Failed to deserialize ", path);
+			return false;
+		}
+		return true;
+	}
+
+	void onInit() {
 		Engine::InitArgs init_data;
-		#ifdef LUMIXENGINE_PLUGINS
-			const char* plugins[] = { LUMIXENGINE_PLUGINS };
-			init_data.plugins = Span(plugins);
-		#endif
-		m_engine = Engine::create(init_data, m_allocator);
+
+		if (os::fileExists("main.pak")) {
+			init_data.file_system = FileSystem::createPacked("main.pak", m_allocator);
+		}
+
+		m_engine = Engine::create(static_cast<Engine::InitArgs&&>(init_data), m_allocator);
 
 		m_universe = &m_engine->createUniverse(true);
 		initRenderPipeline();
-		initDemoScene();
+		
+		auto* gui = static_cast<GUISystem*>(m_engine->getPluginManager().getPlugin("gui"));
+		m_gui_interface.pipeline = m_pipeline.get();
+		gui->setInterface(&m_gui_interface);
 
-		OS::showCursor(false);
+		if (!loadUniverse("universes/main.unv")) {
+			initDemoScene();
+		}
+		while (m_engine->getFileSystem().hasWork()) {
+			os::sleep(10);
+			m_engine->getFileSystem().processCallbacks();
+		}
+		m_engine->getFileSystem().processCallbacks();
+
+		os::showCursor(false);
 		onResize();
+		m_engine->startGame(*m_universe);
 	}
 
 	void shutdown() {
 		m_engine->destroyUniverse(*m_universe);
-		Pipeline::destroy(m_pipeline);
-		Engine::destroy(m_engine, m_allocator);
-		m_engine = nullptr;
-		m_pipeline = nullptr;
+		auto* gui = static_cast<GUISystem*>(m_engine->getPluginManager().getPlugin("gui"));
+		gui->setInterface(nullptr);
+		m_pipeline.reset();
+		m_engine.reset();
 		m_universe = nullptr;
 	}
 
-	void onEvent(const OS::Event& event) override {
-		if (m_engine) {
+	void onEvent(const os::Event& event) {
+		if (m_engine.get()) {
 			InputSystem& input = m_engine->getInputSystem();
-			input.injectEvent(event);
+			input.injectEvent(event, 0, 0);
 		}
 		switch (event.type) {
-			case OS::Event::Type::QUIT:
-			case OS::Event::Type::WINDOW_CLOSE: 
-				OS::quit();
+			case os::Event::Type::QUIT:
+			case os::Event::Type::WINDOW_CLOSE: 
+				m_finished = true;
 				break;
-			case OS::Event::Type::WINDOW_MOVE:
-			case OS::Event::Type::WINDOW_SIZE:
+			case os::Event::Type::WINDOW_MOVE:
+			case os::Event::Type::WINDOW_SIZE:
 				onResize();
 				break;
 		}
 	}
 
-	void onIdle() override {
+	void onIdle() {
 		m_engine->update(*m_universe);
+
+		EntityPtr camera = m_pipeline->getScene()->getActiveCamera();
+		if (camera.isValid()) {
+			int w = m_viewport.w;
+			int h = m_viewport.h;
+			m_viewport = m_pipeline->getScene()->getCameraViewport((EntityRef)camera);
+			m_viewport.w = w;
+			m_viewport.h = h;
+		}
+
 		m_pipeline->setViewport(m_viewport);
 		m_pipeline->render(false);
 		m_renderer->frame();
 	}
 
 	DefaultAllocator m_main_allocator;
-	Debug::Allocator m_allocator;
-	Engine* m_engine = nullptr;
+	debug::Allocator m_allocator;
+	UniquePtr<Engine> m_engine;
 	Renderer* m_renderer = nullptr;
 	Universe* m_universe = nullptr;
-	Pipeline* m_pipeline = nullptr;
+	UniquePtr<Pipeline> m_pipeline;
+
 	Viewport m_viewport;
+	bool m_finished = false;
+	GUIInterface m_gui_interface;
 };
 
 int main(int args, char* argv[])
 {
-	Runner app;
-	OS::run(app);
-	app.shutdown();
+	profiler::setThreadName("Main thread");
+	struct Data {
+		Data() : semaphore(0, 1) {}
+		Runner app;
+		Semaphore semaphore;
+	} data;
+
+	jobs::runEx(&data, [](void* ptr) {
+		Data* data = (Data*)ptr;
+
+		data->app.onInit();
+		while(!data->app.m_finished) {
+			os::Event e;
+			while(os::getEvent(e)) {
+				data->app.onEvent(e);
+			}
+			data->app.onIdle();
+		}
+
+		data->app.shutdown();
+
+		data->semaphore.signal();
+	}, nullptr, jobs::INVALID_HANDLE, 0);
+	
+	PROFILE_BLOCK("sleeping");
+	data.semaphore.wait();
+
 	return 0;
 }
+
+#else
+
+#include "engine/allocators.h"
+#include "engine/os.h"
+#include "renderer/gpu/gpu.h"
+
+using namespace Lumix;
+
+int main(int args, char* argv[]) {
+	os::WindowHandle win = os::createWindow({});
+
+	DefaultAllocator allocator;
+	gpu::preinit(allocator, false);
+	gpu::init(win, gpu::InitFlags::NONE);
+	gpu::ProgramHandle shader = gpu::allocProgramHandle();
+
+	const gpu::ShaderType types[] = {gpu::ShaderType::VERTEX, gpu::ShaderType::FRAGMENT};
+	const char* srcs[] = {
+		"void main() { gl_Position = vec4(gl_VertexID & 1, (gl_VertexID >> 1) & 1, 0, 1); }",
+		"layout(location = 0) out vec4 color; void main() { color = vec4(1, 0, 1, 1); }",
+	};
+	gpu::createProgram(shader, {}, srcs, types, 2, nullptr, 0, "shader");
+
+	bool finished = false;
+	while (!finished) {
+		os::Event e;
+		while (os::getEvent(Ref(e))) {
+			switch (e.type) {
+				case os::Event::Type::WINDOW_CLOSE:
+				case os::Event::Type::QUIT: finished = true; break;
+			}
+		}
+
+		gpu::setFramebuffer(nullptr, 0, gpu::INVALID_TEXTURE, gpu::FramebufferFlags::NONE);
+		const float clear_col[] = {0, 0, 0, 1};
+		gpu::clear(gpu::ClearFlags::COLOR | gpu::ClearFlags::DEPTH, clear_col, 0);
+		gpu::useProgram(shader);
+		gpu::setState(gpu::StateFlags::NONE);
+		gpu::drawArrays(gpu::PrimitiveType::TRIANGLES, 0, 3);
+
+		u32 frame = gpu::swapBuffers();
+		gpu::waitFrame(frame);
+	}
+
+	gpu::shutdown();
+
+	os::destroyWindow(win);
+}
+
+#endif

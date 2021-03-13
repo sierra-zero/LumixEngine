@@ -1,6 +1,7 @@
 #ifdef _WIN32
 	#define INITGUID
-	#define NOGDI 
+	#define NOGDI
+	#define WIN32_LEAN_AND_MEAN
 	#include <Windows.h>
 	#include <evntcons.h>
 #endif
@@ -8,8 +9,10 @@
 #include "engine/array.h"
 #include "engine/crt.h"
 #include "engine/hash_map.h"
-#include "engine/allocator.h"
+#include "engine/allocators.h"
 #include "engine/atomic.h"
+#include "engine/math.h"
+#include "engine/string.h"
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "engine/os.h"
@@ -19,7 +22,7 @@ namespace Lumix
 {
 
 
-namespace Profiler
+namespace profiler
 {
 
 
@@ -37,8 +40,6 @@ struct ThreadContext
 	OutputMemoryStream buffer;
 	u32 begin = 0;
 	u32 end = 0;
-	u32 rows = 0;
-	bool open = false;
 	Mutex mutex;
 	StaticString<64> name;
 	bool show_in_profiler = false;
@@ -144,7 +145,7 @@ static struct Instance
 			trace.ProcessTraceMode = PROCESS_TRACE_MODE_RAW_TIMESTAMP | PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
 			trace.EventRecordCallback = TraceTask::callback;
 			trace_task.open_handle = OpenTrace(&trace);
-			trace_task.create("Profiler trace", true);
+			trace_task.create("profiler trace", true);
 		#endif
 	}
 
@@ -153,7 +154,7 @@ static struct Instance
 	{
 		thread_local ThreadContext* ctx = [&](){
 			ThreadContext* new_ctx = LUMIX_NEW(allocator, ThreadContext)(allocator);
-			new_ctx->thread_id = OS::getCurrentThreadID();
+			new_ctx->thread_id = os::getCurrentThreadID();
 			MutexGuard lock(mutex);
 			contexts.push(new_ctx);
 			return new_ctx;
@@ -166,7 +167,7 @@ static struct Instance
 	DefaultAllocator allocator;
 	Array<ThreadContext*> contexts;
 	Mutex mutex;
-	OS::Timer timer;
+	os::Timer timer;
 	bool paused = false;
 	bool context_switches_enabled = false;
 	u64 paused_time = 0;
@@ -228,7 +229,7 @@ void write(ThreadContext& ctx, EventType type, const T& value)
 #pragma pack()
 	v.header.type = type;
 	v.header.size = sizeof(v);
-	v.header.time = OS::Timer::getRawTimestamp();
+	v.header.time = os::Timer::getRawTimestamp();
 	v.value = value;
 
 	MutexGuard lock(ctx.mutex);
@@ -261,7 +262,7 @@ void write(ThreadContext& ctx, EventType type, const u8* data, int size)
 	header.type = type;
 	ASSERT(sizeof(header) + size <= 0xffff);
 	header.size = u16(sizeof(header) + size);
-	header.time = OS::Timer::getRawTimestamp();
+	header.time = os::Timer::getRawTimestamp();
 
 	MutexGuard lock(ctx.mutex);
 	u8* buf = ctx.buffer.getMutableData();
@@ -311,7 +312,7 @@ void write(ThreadContext& ctx, EventType type, const u8* data, int size)
 		rec.new_thread_id = cs->NewThreadId;
 		rec.old_thread_id = cs->OldThreadId;
 		rec.reason = cs->OldThreadWaitReason;
-		write(g_instance.global_context, rec.timestamp, Profiler::EventType::CONTEXT_SWITCH, rec);
+		write(g_instance.global_context, rec.timestamp, profiler::EventType::CONTEXT_SWITCH, rec);
 	};
 #endif
 
@@ -479,7 +480,7 @@ bool contextSwitchesEnabled()
 
 void frame()
 {
-	const u64 n = OS::Timer::getRawTimestamp();
+	const u64 n = os::Timer::getRawTimestamp();
 	if (g_instance.last_frame_time != 0) {
 		g_instance.last_frame_duration = n - g_instance.last_frame_time;
 	}
@@ -505,69 +506,95 @@ void setThreadName(const char* name)
 	ctx->name = name;
 }
 
-
-GlobalState::GlobalState()
+template <typename T>
+static void read(const ThreadContext& ctx, u32 p, T& value)
 {
-	g_instance.mutex.enter();
+	const u8* buf = ctx.buffer.data();
+	const u32 buf_size = (u32)ctx.buffer.size();
+	const u32 l = p % buf_size;
+	if (l + sizeof(value) <= buf_size) {
+		memcpy(&value, buf + l, sizeof(value));
+		return;
+	}
+
+	memcpy(&value, buf + l, buf_size - l);
+	memcpy((u8*)&value + (buf_size - l), buf, sizeof(value) - (buf_size - l));
 }
 
+static void saveStrings(OutputMemoryStream& blob) {
+	HashMap<const char*, const char*> map(g_instance.allocator);
+	map.reserve(512);
+	auto gather = [&](const ThreadContext& ctx){
+		u32 p = ctx.begin;
+		const u32 end = ctx.end;
+		while (p != end) {
+			profiler::EventHeader header;
+			read(ctx, p, header);
+			switch (header.type) {
+				case profiler::EventType::BEGIN_BLOCK: {
+					const char* name;
+					read(ctx, p + sizeof(profiler::EventHeader), name);
+					if (!map.find(name).isValid()) {
+						map.insert(name, name);
+					}
+					break;
+				}
+				case profiler::EventType::INT: {
+					IntRecord r;
+					read(ctx, p + sizeof(profiler::EventHeader), r);
+					if (!map.find(r.key).isValid()) {
+						map.insert(r.key, r.key);
+					}
+					break;
+				}
+				default: break;
+			}
+			p += header.size;
+		}
+	};
 
-GlobalState::~GlobalState()
-{
-	ASSERT(local_readers_count == 0);
-	g_instance.mutex.exit();
+	gather(g_instance.global_context);
+	for (const ThreadContext* ctx : g_instance.contexts) {
+		gather(*ctx);
+	}
+
+	blob.write(map.size());
+	for (auto iter : map) {
+		blob.write((u64)(uintptr)iter);
+		blob.write(iter, strlen(iter) + 1);
+	}
 }
 
-
-int GlobalState::threadsCount() const
-{
-	return g_instance.contexts.size();
+void serialize(OutputMemoryStream& blob, ThreadContext& ctx) {
+	MutexGuard lock(ctx.mutex);
+	blob.writeString(ctx.name);
+	blob.write(ctx.thread_id);
+	blob.write(ctx.begin);
+	blob.write(ctx.end);
+	blob.write((u8)ctx.show_in_profiler);
+	blob.write((u32)ctx.buffer.size());
+	blob.write(ctx.buffer.data(), ctx.buffer.size());
 }
 
-
-const char* GlobalState::getThreadName(int idx) const
-{
-	ThreadContext* ctx = g_instance.contexts[idx];
-	MutexGuard lock(ctx->mutex);
-	return ctx->name;
+void serialize(OutputMemoryStream& blob) {
+	MutexGuard lock(g_instance.mutex);
+	blob.write<u32>(0); // version
+	blob.write((u32)g_instance.contexts.size());
+	serialize(blob, g_instance.global_context);
+	for (ThreadContext* ctx : g_instance.contexts) {
+		serialize(blob, *ctx);
+	}	
+	saveStrings(blob);
 }
-
-
-ThreadState::ThreadState(GlobalState& reader, int thread_idx)
-	: reader(reader)
-	, thread_idx(thread_idx)
-{
-	++reader.local_readers_count;
-	ThreadContext& ctx = thread_idx >= 0 ? *g_instance.contexts[thread_idx] : g_instance.global_context;
-
-	ctx.mutex.enter();
-	buffer = ctx.buffer.getMutableData();
-	buffer_size = (u32)ctx.buffer.size();
-	begin = ctx.begin;
-	end = ctx.end;
-	thread_id = ctx.thread_id;
-	name = ctx.name;
-	show = ctx.show_in_profiler;
-}
-
-
-ThreadState::~ThreadState()
-{
-	ThreadContext& ctx = thread_idx >= 0 ? *g_instance.contexts[thread_idx] : g_instance.global_context;
-	ctx.show_in_profiler = show;
-	ctx.mutex.exit();
-	--reader.local_readers_count;
-}
-
 
 void pause(bool paused)
 {
 	g_instance.paused = paused;
-	if (paused) g_instance.paused_time = OS::Timer::getRawTimestamp();
+	if (paused) g_instance.paused_time = os::Timer::getRawTimestamp();
 }
 
 
 } // namespace Lumix
 
 
-} //	namespace Profiler
+} //	namespace profiler

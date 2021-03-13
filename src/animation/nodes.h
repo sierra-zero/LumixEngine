@@ -10,7 +10,7 @@ namespace Lumix
 struct Model;
 struct Pose;
 
-namespace Anim
+namespace anim
 {
 
 struct Controller;
@@ -49,10 +49,10 @@ struct Node {
 
 	virtual ~Node() {}
 	virtual Type type() const = 0;
-	virtual void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const = 0;
+	virtual void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const = 0;
 	virtual void enter(RuntimeContext& ctx) const = 0;
 	virtual void skip(RuntimeContext& ctx) const = 0;
-	virtual void getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const = 0;
+	virtual void getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const = 0;
 	virtual void serialize(OutputMemoryStream& stream) const = 0;
 	virtual void deserialize(InputMemoryStream& stream, Controller& ctrl) = 0;
 
@@ -66,24 +66,29 @@ struct AnimationNode final : Node {
 	AnimationNode(GroupNode* parent, IAllocator& allocator);
 	Type type() const override { return ANIMATION; }
 	
-	void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const override;
+	void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const override;
 	void enter(RuntimeContext& ctx) const override;
 	void skip(RuntimeContext& ctx) const override;
-	void getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const override;
+	void getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const override;
 	void serialize(OutputMemoryStream& stream) const override;
 	void deserialize(InputMemoryStream& stream, Controller& ctrl) override;
 
+	enum Flags : u32 {
+		LOOPED = 1 << 0
+	};
+
 	u32 m_slot;
+	u32 m_flags = LOOPED;
 };
 
 struct Blend1DNode final : Node {
 	Blend1DNode(GroupNode* parent, IAllocator& allocator);
 	Type type() const override { return BLEND1D; }
 	
-	void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const override;
+	void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const override;
 	void enter(RuntimeContext& ctx) const override;
 	void skip(RuntimeContext& ctx) const override;
-	void getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const override;
+	void getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const override;
 	void serialize(OutputMemoryStream& stream) const override;
 	void deserialize(InputMemoryStream& stream, Controller& ctrl) override;
 
@@ -98,13 +103,14 @@ struct Blend1DNode final : Node {
 
 struct GroupNode final : Node {
 	GroupNode(GroupNode* parent, IAllocator& allocator);
+	GroupNode(GroupNode&& rhs) = default;
 	~GroupNode();
 	Type type() const override { return GROUP; }
 
-	void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const override;
+	void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const override;
 	void enter(RuntimeContext& ctx) const override;
 	void skip(RuntimeContext& ctx) const override;
-	void getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const override;
+	void getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const override;
 	void serialize(OutputMemoryStream& stream) const override;
 	void deserialize(InputMemoryStream& stream, Controller& ctrl) override;
 
@@ -153,15 +159,16 @@ struct LayersNode final : Node {
 	LayersNode(GroupNode* parent, IAllocator& allocator);
 	Type type() const override { return LAYERS; }
 	
-	void update(RuntimeContext& ctx, Ref<LocalRigidTransform> root_motion) const override;
+	void update(RuntimeContext& ctx, LocalRigidTransform& root_motion) const override;
 	void enter(RuntimeContext& ctx) const override;
 	void skip(RuntimeContext& ctx) const override;
-	void getPose(RuntimeContext& ctx, float weight, Ref<Pose> pose, u32 mask) const override;
+	void getPose(RuntimeContext& ctx, float weight, Pose& pose, u32 mask) const override;
 	void serialize(OutputMemoryStream& stream) const override;
 	void deserialize(InputMemoryStream& stream, Controller& ctrl) override;
 
 	struct Layer {
 		Layer(GroupNode* parent, IAllocator& allocator);
+
 		GroupNode node;
 		u32 mask = 0;
 		String name;
@@ -171,5 +178,5 @@ struct LayersNode final : Node {
 	Array<Layer> m_layers;
 };
 
-} // ns anim
-} // ns Lumix
+} // namespace anim
+} // namespace Lumix

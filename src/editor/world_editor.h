@@ -10,17 +10,17 @@ struct lua_State;
 namespace Lumix
 {
 
-namespace OS { enum class MouseButton; }
+namespace os { enum class MouseButton; }
 
-template <typename T> struct DelegateList;
 template <typename T> struct Array;
+template <typename T> struct DelegateList;
+template <typename T> struct UniquePtr;
 
 
 struct IEditorCommand
 {
 	virtual ~IEditorCommand() {}
 
-	virtual bool isReady() { return true; }
 	virtual bool execute() = 0;
 	virtual void undo() = 0;
 	virtual const char* getType() = 0;
@@ -49,9 +49,10 @@ struct UniverseView {
 	virtual void setSideView() = 0;
 	virtual void moveCamera(float forward, float right, float up, float speed) = 0;
 	virtual void copyTransform() = 0;
+	virtual void refreshIcons() = 0;
 
-	virtual bool isMouseDown(OS::MouseButton button) const = 0;
-	virtual bool isMouseClick(OS::MouseButton button) const = 0;
+	virtual bool isMouseDown(os::MouseButton button) const = 0;
+	virtual bool isMouseClick(os::MouseButton button) const = 0;
 	virtual Vec2 getMousePos() const = 0;
 	virtual void setMouseSensitivity(float x, float y) = 0;
 	virtual Vec2 getMouseSensitivity() = 0;
@@ -67,6 +68,7 @@ LUMIX_EDITOR_API void addSphere(UniverseView& view, const DVec3& center, float r
 LUMIX_EDITOR_API void addCube(UniverseView& view, const DVec3& center, const Vec3& x, const Vec3& y, const Vec3& z, Color color);
 LUMIX_EDITOR_API void addCube(UniverseView& view, const DVec3& min, const DVec3& max, Color color);
 LUMIX_EDITOR_API void addLine(UniverseView& view, const DVec3& a, const DVec3& b, Color color);
+LUMIX_EDITOR_API void addCylinder(UniverseView& view, const DVec3& pos, const Vec3& up, float radius, float height, Color color);
 LUMIX_EDITOR_API void addCone(UniverseView& view, const DVec3& vertex, const Vec3& dir, const Vec3& axis0, const Vec3& axis1, Color color);
 LUMIX_EDITOR_API void addFrustum(UniverseView& view, const struct ShiftedFrustum& frustum, Color color);
 LUMIX_EDITOR_API void addCapsule(UniverseView& view, const DVec3& position, float height, float radius, Color color);
@@ -80,10 +82,7 @@ struct LUMIX_EDITOR_API WorldEditor
 		NONE
 	};
 
-	using CommandCreator = IEditorCommand* (lua_State*, WorldEditor&);
-
-	static WorldEditor* create(struct Engine& engine, struct IAllocator& allocator);
-	static void destroy(WorldEditor* editor, IAllocator& allocator);
+	static UniquePtr<WorldEditor> create(struct Engine& engine, struct IAllocator& allocator);
 
 	virtual bool loadProject() = 0;
 	virtual void update() = 0;
@@ -93,11 +92,9 @@ struct LUMIX_EDITOR_API WorldEditor
 	virtual UniverseView& getView() = 0;
 	virtual void setView(UniverseView* view) = 0;
 	
-	virtual void beginCommandGroup(u32 type) = 0;
+	virtual void beginCommandGroup(const char* type) = 0;
 	virtual void endCommandGroup() = 0;
-	virtual void executeCommand(IEditorCommand* command) = 0;
-	virtual void executeCommand(const char* name, const char* args) = 0;
-	virtual void registerCommand(const char* name, CommandCreator* creator) = 0;
+	virtual void executeCommand(UniquePtr<IEditorCommand>&& command) = 0;
 	virtual bool isUniverseChanged() const = 0;
 	virtual bool canUndo() const = 0;
 	virtual bool canRedo() const = 0;
@@ -147,18 +144,24 @@ struct LUMIX_EDITOR_API WorldEditor
 
 	virtual void loadUniverse(const char* basename) = 0;
 	virtual void saveUniverse(const char* basename, bool save_path) = 0;
+	virtual bool isLoading() const = 0;
 	virtual void newUniverse() = 0;
 	virtual void toggleGameMode() = 0;
 	
 	virtual DelegateList<void()>& universeCreated() = 0;
 	virtual DelegateList<void()>& universeDestroyed() = 0;
 
+	virtual u16 createEntityFolder(u16 parent) = 0;
+	virtual void destroyEntityFolder(u16 folder) = 0;
+	virtual void renameEntityFolder(u16 folder, const char* new_name) = 0;
+	virtual void moveEntityToFolder(EntityRef entity, u16 folder) = 0;
+
 	virtual struct PrefabSystem& getPrefabSystem() = 0;
+	virtual struct EntityFolders& getEntityFolders() = 0;
 	virtual void snapEntities(const DVec3& hit_pos, bool translate_mode) = 0;
 
 	virtual bool isGameMode() const = 0;
-
-protected:
 	virtual ~WorldEditor() {}
 };
+
 }

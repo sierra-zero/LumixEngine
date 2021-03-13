@@ -1,5 +1,6 @@
 #include "engine/hash_map.h"
 #include "engine/thread.h"
+#include "engine/delegate.h"
 #include "engine/os.h"
 #include "engine/profiler.h"
 #include "engine/string.h"
@@ -38,8 +39,8 @@ struct FileSystemWatcherTask : Lumix::Thread
     Lumix::IAllocator& allocator;
     FileSystemWatcherImpl& watcher;
 	volatile bool finished;
-	char path[Lumix::MAX_PATH_LENGTH];
-	Lumix::HashMap<int, Lumix::StaticString<Lumix::MAX_PATH_LENGTH> > watched;
+	char path[LUMIX_MAX_PATH];
+	Lumix::HashMap<int, Lumix::StaticString<LUMIX_MAX_PATH> > watched;
 	int fd;
 };
 
@@ -85,45 +86,36 @@ struct FileSystemWatcherImpl : FileSystemWatcher
 };
 
 
-FileSystemWatcher* FileSystemWatcher::create(const char* path, Lumix::IAllocator& allocator)
+UniquePtr<FileSystemWatcher> FileSystemWatcher::create(const char* path, Lumix::IAllocator& allocator)
 {
-	auto* watcher = LUMIX_NEW(allocator, FileSystemWatcherImpl)(allocator);
+	UniquePtr<FileSystemWatcherImpl> watcher = UniquePtr<FileSystemWatcherImpl>::create(allocator, allocator);
 	if(!watcher->start(path))
     {
-        LUMIX_DELETE(allocator, watcher);
-        return nullptr;
+        return UniquePtr<FileSystemWatcher>();
     }
 	return watcher;
 }
 
 
-void FileSystemWatcher::destroy(FileSystemWatcher* watcher)
-{
-	if (!watcher) return;
-	auto* impl_watcher = (FileSystemWatcherImpl*)watcher;
-	LUMIX_DELETE(impl_watcher->allocator, impl_watcher);
-}
-
-
 static void addWatch(FileSystemWatcherTask& task, const char* path, int root_length)
 {
-	if (!OS::dirExists(path)) return;
+	if (!os::dirExists(path)) return;
 	
     int wd = inotify_add_watch(task.fd, path, IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
     task.watched.insert(wd, path + root_length);
 
-    auto iter = OS::createFileIterator(path, task.allocator);
-    OS::FileInfo info;
-    while (OS::getNextFile(iter, &info))
+    auto iter = os::createFileIterator(path, task.allocator);
+    os::FileInfo info;
+    while (os::getNextFile(iter, &info))
     {
         if (!info.is_directory) continue;
 		if (Lumix::equalStrings(info.filename, ".")) continue;
 		if (Lumix::equalStrings(info.filename, "..")) continue;
 
-        Lumix::StaticString<Lumix::MAX_PATH_LENGTH> tmp(path, info.filename, "/");
+        Lumix::StaticString<LUMIX_MAX_PATH> tmp(path, info.filename, "/");
         addWatch(task, tmp, root_length);
     }
-    OS::destroyFileIterator(iter);
+    os::destroyFileIterator(iter);
 }
 
 
@@ -159,7 +151,7 @@ int FileSystemWatcherTask::task()
 
         while ((char*)event < buf + r)
         {
-            char tmp[Lumix::MAX_PATH_LENGTH];
+            char tmp[LUMIX_MAX_PATH];
             getName(*this, event, tmp, Lumix::lengthOf(tmp));
             if (event->mask & IN_CREATE) addWatch(*this, tmp, root_length);
             watcher.callback.invoke(tmp);

@@ -4,8 +4,8 @@
 #include <math.h>
 
 
-static const float NODE_SLOT_RADIUS = 4.0f;
-
+static constexpr float HANDLE_RADIUS = 4;
+using namespace ImGui;
 
 ImVec2::ImVec2(const Lumix::Vec2& f) 
 	: x(f.x)
@@ -17,8 +17,7 @@ ImVec2::operator Lumix::Vec2() const {
 }                                               
 
 
-namespace ImGui
-{
+namespace ImGuiEx {
 
 	bool CheckboxEx(const char* label, bool* v)
 	{
@@ -187,142 +186,6 @@ namespace ImGui
 			}
 		}
 		g.Windows.push_back(window);
-	}
-
-
-	static ImVec2 node_pos;
-	static ImGuiID last_node_id;
-
-
-	void BeginNode(ImGuiID id, ImVec2 screen_pos)
-	{
-		PushID(id);
-		last_node_id = id;
-		node_pos = screen_pos;
-		SetCursorScreenPos(screen_pos + GetStyle().WindowPadding);
-		PushItemWidth(150);
-		ImDrawList* draw_list = GetWindowDrawList();
-		draw_list->ChannelsSplit(2);
-		draw_list->ChannelsSetCurrent(1);
-		BeginGroup();
-	}
-
-
-	void EndNode(ImVec2& pos)
-	{
-		ImDrawList* draw_list = GetWindowDrawList();
-		ImGui::SameLine();
-		EndGroup();
-		const ImVec2 size = ImGui::GetItemRectSize() + ImGui::GetStyle().WindowPadding * 2;
-		PopItemWidth();
-		SetCursorScreenPos(node_pos);
-
-		SetNextWindowPos(node_pos);
-		SetNextWindowSize(size);
-		BeginChild((ImGuiID)last_node_id, size, false, ImGuiWindowFlags_NoInputs);
-		EndChild();
-
-		SetCursorScreenPos(node_pos);
-		InvisibleButton("bg", size);
-		if (IsItemActive() && IsMouseDragging(0))
-		{
-			pos += GetIO().MouseDelta;
-		}
-
-		draw_list->ChannelsSetCurrent(0);
-		draw_list->AddRectFilled(node_pos, node_pos + size, ImColor(230, 230, 230), 4.0f);
-		draw_list->AddRect(node_pos, node_pos + size, ImColor(150, 150, 150), 4.0f);
-
-		PopID();
-		draw_list->ChannelsMerge();
-	}
-
-
-	ImVec2 GetNodeInputPos(ImGuiID id, int input)
-	{
-		PushID(id);
-
-		ImGuiWindow* parent_win = GetCurrentWindow();
-		char title[256];
-		ImFormatString(title, IM_ARRAYSIZE(title), "%s/%08X", parent_win->Name, id);
-		ImGuiWindow* win = FindWindowByName(title);
-		if (!win)
-		{
-			PopID();
-			return ImVec2(0, 0);
-		}
-
-		ImVec2 pos = win->Pos;
-		pos.x -= NODE_SLOT_RADIUS;
-		ImGuiStyle& style = GetStyle();
-		pos.y += (GetTextLineHeight() + style.ItemSpacing.y) * input;
-		pos.y += style.WindowPadding.y + GetTextLineHeight() * 0.5f;
-
-
-		PopID();
-		return pos;
-	}
-
-
-	ImVec2 GetNodeOutputPos(ImGuiID id, int output)
-	{
-		PushID(id);
-
-		ImGuiWindow* parent_win = GetCurrentWindow();
-		char title[256];
-		ImFormatString(title, IM_ARRAYSIZE(title), "%s/%08X", parent_win->Name, id);
-		ImGuiWindow* win = FindWindowByName(title);
-		if (!win)
-		{
-			PopID();
-			return ImVec2(0, 0);
-		}
-
-		ImVec2 pos = win->Pos;
-		pos.x += win->Size.x + NODE_SLOT_RADIUS;
-		ImGuiStyle& style = GetStyle();
-		pos.y += (GetTextLineHeight() + style.ItemSpacing.y) * output;
-		pos.y += style.WindowPadding.y + GetTextLineHeight() * 0.5f;
-
-		PopID();
-		return pos;
-	}
-
-
-	bool NodePin(ImGuiID id, ImVec2 screen_pos)
-	{
-		ImDrawList* draw_list = GetWindowDrawList();
-		SetCursorScreenPos(screen_pos - ImVec2(NODE_SLOT_RADIUS, NODE_SLOT_RADIUS));
-		PushID(id);
-		InvisibleButton("", ImVec2(2 * NODE_SLOT_RADIUS, 2 * NODE_SLOT_RADIUS));
-		bool hovered = IsItemHovered();
-		PopID();
-		draw_list->AddCircleFilled(screen_pos,
-			NODE_SLOT_RADIUS,
-			hovered ? ImColor(0, 150, 0, 150) : ImColor(150, 150, 150, 150));
-		return hovered;
-	}
-
-
-	void NodeLink(ImVec2 from, ImVec2 to)
-	{
-		ImVec2 p1 = from;
-		ImVec2 t1 = ImVec2(+80.0f, 0.0f);
-		ImVec2 p2 = to;
-		ImVec2 t2 = ImVec2(+80.0f, 0.0f);
-		const int STEPS = 12;
-		ImDrawList* draw_list = GetWindowDrawList();
-		for (int step = 0; step <= STEPS; step++)
-		{
-			float t = (float)step / (float)STEPS;
-			float h1 = +2 * t * t * t - 3 * t * t + 1.0f;
-			float h2 = -2 * t * t * t + 3 * t * t;
-			float h3 = t * t * t - 2 * t * t + t;
-			float h4 = t * t * t - t * t;
-			draw_list->PathLineTo(ImVec2(h1 * p1.x + h2 * p2.x + h3 * t1.x + h4 * t2.x,
-				h1 * p1.y + h2 * p2.y + h3 * t1.y + h4 * t2.y));
-		}
-		draw_list->PathStroke(ImColor(200, 200, 100), false, 3.0f);
 	}
 
 
@@ -546,7 +409,7 @@ namespace ImGui
 
 				SetCursorScreenPos(pos - ImVec2(SIZE, SIZE));
 				PushID(idx);
-				InvisibleButton("", ImVec2(2 * NODE_SLOT_RADIUS, 2 * NODE_SLOT_RADIUS));
+				InvisibleButton("", ImVec2(2 * HANDLE_RADIUS, 2 * HANDLE_RADIUS));
 
 				bool is_selected = selected_point && *selected_point == point_idx + idx;
 				float thickness = is_selected ? 2.0f : 1.0f;
@@ -607,7 +470,7 @@ namespace ImGui
 
 				SetCursorScreenPos(tang - ImVec2(SIZE, SIZE));
 				PushID(-idx);
-				InvisibleButton("", ImVec2(2 * NODE_SLOT_RADIUS, 2 * NODE_SLOT_RADIUS));
+				InvisibleButton("", ImVec2(2 * HANDLE_RADIUS, 2 * HANDLE_RADIUS));
 
 				window->DrawList->AddLine(pos, tang, GetColorU32(ImGuiCol_PlotLines));
 
@@ -637,7 +500,7 @@ namespace ImGui
 			PushID(point_idx);
 			if ((flags & (int)CurveEditorFlags::NO_TANGENTS) == 0)
 			{
-				window->DrawList->AddBezierCurve(
+				window->DrawList->AddBezierCubic(
 					transform(p_prev),
 					transform(p_prev + tangent_last),
 					transform(p + tangent),
@@ -766,10 +629,7 @@ namespace ImGui
 
 	bool BeginResizablePopup(const char* str_id, const ImVec2& size_on_first_use)
 	{
-		ImGuiContext& g = *GImGui;
-		ImGuiWindow* window = g.CurrentWindow;
-		const ImGuiID id = window->GetID(str_id);
-		if (!IsPopupOpen(id))
+		if (!IsPopupOpen(str_id))
 		{
 			GImGui->NextWindowData.ClearFlags();
 			return false;
@@ -778,7 +638,7 @@ namespace ImGui
 		ImGuiWindowFlags flags = ImGuiWindowFlags_Popup | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
 
 		char name[32];
-		ImFormatString(name, 20, "##popup_%08x", id);
+		ImFormatString(name, 20, "##popup_%s", str_id);
 
 		ImGui::SetNextWindowSize(size_on_first_use, ImGuiCond_FirstUseEver);
 		bool opened = ImGui::Begin(name, NULL, flags);
@@ -833,9 +693,6 @@ namespace ImGui
 	}
 
 
-} // namespace ImGui
-
-namespace ImGuiEx {
 	bool IconButton(const char* icon, const char* tooltip) {
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
 		ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_WindowBg]);
@@ -892,5 +749,123 @@ namespace ImGuiEx {
 		ImGui::SetCursorScreenPos(textRect.Max - ImVec2{0, textSize.y + window->DC.CurrLineTextBaseOffset});
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(itemWidth);
+	}
+
+	bool Gradient4(const char* label, int max_count, int* count, float* keys, float* values) {
+		ImGui::PushID(label);
+		IM_ASSERT(*count > 1);
+		IM_ASSERT(keys[0] >= 0 && keys[0] <= 1);
+		IM_ASSERT(max_count >= *count);
+		
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const ImVec2 min = ImGui::GetCursorScreenPos();
+		const float w = ImGui::CalcItemWidth();
+		const ImVec2 max = min + ImVec2(w, ImGui::GetTextLineHeight());
+
+		ImColor c0(values[0], values[1], values[2], values[3]);
+		ImVec2 to;
+		to.x = min.x * (1 - keys[0]) + max.x * keys[0];
+		to.y = max.y;
+		dl->AddRectFilledMultiColor(min, to, c0, c0, c0, c0);
+
+		for (int i = 0; i < *count - 1; ++i) {
+			float t0 = keys[i];
+			float t1 = keys[i + 1];
+			
+			IM_ASSERT(t0 <= t1);
+			IM_ASSERT(t0 >= 0);
+			IM_ASSERT(t1 <= 1);
+			
+			ImVec2 from = min * (1 - t0) + max * t0;
+			from.y = min.y;
+			ImVec2 to;
+			to.x = min.x * (1 - t1) + max.x * t1;
+			to.y = max.y;
+
+			const int i1 = i + 1;
+			const ImColor c1(values[i1 * 4 + 0], values[i1 * 4 + 1], values[i1 * 4 + 2], values[i1 * 4 + 3]);
+			dl->AddRectFilledMultiColor(from, to, c0, c1, c1, c0);
+			c0 = c1;
+		}
+
+		ImVec2 from;
+		from.x = min.x * (1 - keys[*count - 1]) + max.x * keys[*count - 1];
+		from.y = min.y;
+		dl->AddRectFilledMultiColor(from, max, c0, c0, c0, c0);
+
+		ImGui::SetCursorScreenPos(min);
+		ImGui::InvisibleButton("gradient", max - min);
+		if (ImGui::IsItemActive() && ImGui::IsMouseDoubleClicked(0) && *count < max_count) {
+			const float x = ImGui::GetMousePos().x;
+			const float key = (x - min.x) / (max.x - min.x);
+			bool found = false;
+			for (int i = 0; i < *count; ++i) {
+				if (key < keys[i]) {
+					for (int j = *count; j >= i; --j) {
+						keys[j + 1] = keys[j];
+						values[j * 4 + 4] = values[j * 4 + 0];
+						values[j * 4 + 5] = values[j * 4 + 1];
+						values[j * 4 + 6] = values[j * 4 + 2];
+						values[j * 4 + 7] = values[j * 4 + 3];
+					}
+					found = true;
+					keys[i] = key;
+					break;
+				}
+			}
+
+			if (!found) {
+				keys[*count] = key;
+				values[*count] = values[*count - 1];
+			}
+
+			++*count;
+		}
+
+		bool changed = false;
+		for (int i = 0; i < *count; ++i) {
+			const float t = keys[i];
+			ImVec2 p;
+			p.x = min.x * (1 - t) + max.x * t;
+			p.y = max.y;
+
+			ImGui::PushID(i);
+			ImGui::SetCursorScreenPos(p - ImVec2(5, 9));
+			ImGui::InvisibleButton("", ImVec2(10, 15));
+
+			const bool hovered = ImGui::IsItemHovered();
+			const ImU32 col = hovered ? ImGui::GetColorU32(ImGuiCol_SliderGrabActive) : ImGui::GetColorU32(ImGuiCol_SliderGrab);
+			dl->AddRectFilled(p - ImVec2(4, 4), p + ImVec2(4, 5), col);
+			dl->AddTriangleFilled(p - ImVec2(-4, 4)
+				, p - ImVec2(4, 4)
+				, p - ImVec2(0, 8)
+				, col);
+			
+			static float start_val;
+			if (ImGui::IsItemActive() && ImGui::IsMouseClicked(0)) {
+				start_val = keys[i];
+			}
+
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+				keys[i] = start_val + ImGui::GetMouseDragDelta().x / (max.x - min.x);
+				keys[i] = ImClamp(keys[i], 0.f, 1.f);
+				changed = true;
+			}
+			if (ImGui::IsItemActive() && ImGui::IsMouseDoubleClicked(0)) {
+				ImGui::OpenPopup("edit");
+			}
+
+			if (ImGui::BeginPopup("edit")) {
+				ImGui::ColorPicker4("Color", &values[i * 4]);
+				ImGui::EndPopup();
+			}
+
+			ImGui::PopID();
+		}
+
+		ImGui::PopID();
+		ImGui::SetCursorScreenPos(max);
+//		ImGui::NewLine();
+		return changed;
 	}
 }

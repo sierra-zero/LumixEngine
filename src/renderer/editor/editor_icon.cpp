@@ -5,7 +5,6 @@
 #include "engine/geometry.h"
 #include "engine/math.h"
 #include "engine/os.h"
-#include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/universe.h"
 #include "renderer/model.h"
@@ -16,12 +15,12 @@ namespace Lumix
 {
 
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType PHYSICAL_CONTROLLER_TYPE = Reflection::getComponentType("physical_controller");
-static const ComponentType CAMERA_TYPE = Reflection::getComponentType("camera");
-static const ComponentType ENVIRONMENT_TYPE = Reflection::getComponentType("environment");
-static const ComponentType POINT_LIGHT_TYPE = Reflection::getComponentType("point_light");
-static const ComponentType TERRAIN_TYPE = Reflection::getComponentType("terrain");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType PHYSICAL_CONTROLLER_TYPE = reflection::getComponentType("physical_controller");
+static const ComponentType CAMERA_TYPE = reflection::getComponentType("camera");
+static const ComponentType ENVIRONMENT_TYPE = reflection::getComponentType("environment");
+static const ComponentType POINT_LIGHT_TYPE = reflection::getComponentType("point_light");
+static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
 
 
 enum class IconType
@@ -76,7 +75,7 @@ struct EditorIconsImpl final : EditorIcons
 		ResourceManagerHub& rm = engine.getResourceManager();
 		for (u32 i = 0; i < lengthOf(ICONS); ++i)
 		{
-			StaticString<MAX_PATH_LENGTH> tmp("editor/models/", ICONS[i], "_3d.fbx");
+			StaticString<LUMIX_MAX_PATH> tmp("editor/models/", ICONS[i], "_3d.fbx");
 			m_is_3d[i] = fs.fileExists(tmp);
 			if (m_is_3d[i])
 			{
@@ -96,7 +95,7 @@ struct EditorIconsImpl final : EditorIcons
 
 	~EditorIconsImpl()
 	{
-		for (auto& model : m_models) model->getResourceManager().unload(*model);
+		for (auto& model : m_models) model->decRefCount();
 
 		auto& universe = m_scene.getUniverse();
 		universe.entityDestroyed().bind<&EditorIconsImpl::destroyIcon>(this);
@@ -107,22 +106,26 @@ struct EditorIconsImpl final : EditorIcons
 
 	void destroyIcon(EntityRef entity)
 	{
-		for(int i = 0, c = m_icons.size(); i < c; ++i)
-		{
-			if(m_icons[i].entity == entity)
-			{
-				m_icons.swapAndPop(i);
-				return;
-			}
+		if (!m_editor.isLoading()) {
+			m_icons.erase(entity);
 		}
 	}
 
+	void refresh() override {
+		m_icons.clear();
+		Universe& universe = m_scene.getUniverse();
+		for (EntityPtr e = universe.getFirstEntity(); e.isValid(); e = universe.getNextEntity((EntityRef)e)) {
+			createIcon((EntityRef)e);
+		}
+	}
 
 	void refreshIcon(const ComponentUID& cmp)
 	{
-		ASSERT(cmp.isValid());
-		destroyIcon((EntityRef)cmp.entity);
-		createIcon((EntityRef)cmp.entity);
+		if (!m_editor.isLoading()) {
+			ASSERT(cmp.isValid());
+			destroyIcon((EntityRef)cmp.entity);
+			createIcon((EntityRef)cmp.entity);
+		}
 	}
 
 
@@ -130,9 +133,10 @@ struct EditorIconsImpl final : EditorIcons
 	{
 		Universe& universe = *m_editor.getUniverse();
 		
-		if (universe.getComponent(entity, MODEL_INSTANCE_TYPE).isValid()) return;
+		const u64 mask = universe.getComponentsMask(entity);
+		if (mask & ((u64)1 << (u64)MODEL_INSTANCE_TYPE.index)) return;
 
-		auto& icon = m_icons.emplace();
+		auto& icon = m_icons.insert(entity);
 		icon.entity = entity;
 		icon.type = IconType::ENTITY;
 		for (ComponentUID cmp = universe.getFirstComponent(entity); cmp.isValid(); cmp = universe.getNextComponent(cmp))
@@ -173,7 +177,7 @@ struct EditorIconsImpl final : EditorIcons
 		for(auto& icon : m_icons) {
 			const Transform icon_tr = getIconTransform(icon, vp.rot, vp.is_ortho, vp.ortho_size);
 			
-			const Vec3 rel_origin = icon_tr.rot.conjugated() * (origin - icon_tr.pos).toFloat();
+			const Vec3 rel_origin = icon_tr.rot.conjugated() * Vec3(origin - icon_tr.pos);
 			const Vec3 rel_dir = icon_tr.rot.conjugated() * dir;
 			const RayCastModelHit hit = m_models[(int)icon.type]->castRay(rel_origin / icon_tr.scale, rel_dir, nullptr);
 			if (hit.is_hit && hit.t >= 0 && (hit.t < res.t || res.t < 0)) {
@@ -212,7 +216,7 @@ struct EditorIconsImpl final : EditorIcons
 		else
 		{
 			ret = camera_matrix;
-			ret.setTranslation((m_editor.getUniverse()->getPosition(icon.entity) - vp_pos).toFloat());
+			ret.setTranslation(Vec3(m_editor.getUniverse()->getPosition(icon.entity) - vp_pos));
 		}
 		if (is_ortho)
 		{
@@ -237,7 +241,7 @@ struct EditorIconsImpl final : EditorIcons
 
 		for(auto& icon : m_icons) {
 			const DVec3 position = universe.getPosition(icon.entity);
-			const float distance = (position - vp.pos).toFloat().length();
+			const float distance = (float)length(position - vp.pos);
 			float scale_factor = MIN_SCALE_FACTOR + distance;
 			scale_factor = clamp(scale_factor, MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
 			icon.scale = tanf(vp.fov * 0.5f) * distance / scale_factor;
@@ -247,7 +251,7 @@ struct EditorIconsImpl final : EditorIcons
 		}
 	}
 
-	Array<Icon> m_icons;
+	HashMap<EntityRef, Icon> m_icons;
 	Model* m_models[(int)IconType::COUNT];
 	bool m_is_3d[(int)IconType::COUNT];
 	WorldEditor& m_editor;
@@ -255,16 +259,9 @@ struct EditorIconsImpl final : EditorIcons
 };
 
 
-EditorIcons* EditorIcons::create(WorldEditor& editor, RenderScene& scene)
+UniquePtr<EditorIcons> EditorIcons::create(WorldEditor& editor, RenderScene& scene)
 {
-	return LUMIX_NEW(editor.getAllocator(), EditorIconsImpl)(editor, scene);
-}
-
-
-void EditorIcons::destroy(EditorIcons& icons)
-{
-	auto& i = static_cast<EditorIconsImpl&>(icons);
-	LUMIX_DELETE(i.m_editor.getAllocator(), &icons);
+	return UniquePtr<EditorIconsImpl>::create(editor.getAllocator(), editor, scene);
 }
 
 
